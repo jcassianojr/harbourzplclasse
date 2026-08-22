@@ -2,88 +2,6 @@
 #include "hbzebra.ch"
 #include "harupdf.ch"
 
-// ============================================================================
-// PROGRAMA DE TESTE
-// ============================================================================
-PROCEDURE Main()
-   Local oConverter
-   Local cZplString, cZplFile := "teste.zpl"
-   Local cPdfFile := "teste.pdf"
-   Local lSuccess
-
-   if .not. file("teste.zpl")
-     // 1. Cria um ZPL de exemplo e salva no disco para simular o teste
-     cZplString := "^XA" + hb_Eol() + ;
-                   "^FO50,50^GB400,200,2^FS" + hb_Eol() + ;
-                   "^FO70,70^FDTeste de Impressao em PDF^FS" + hb_Eol() + ;
-                   "^BY2,2,80" + hb_Eol() + ;
-                   "^FO70,120^BC^FD1234567890^FS" + hb_Eol() + ;
-                   "^XZ"
-     hb_MemoWrit( cZplFile, cZplString )
-   endif
-   
-   ? "Iniciando conversao de ZPL para PDF..."
-   
-   // 2. Instancia a classe e executa a geração
-   oConverter := TZebraToPdf():New(300)
-   
-   // Lemos do arquivo que acabamos de criar
-   lSuccess := oConverter:Generate( hb_MemoRead( cZplFile ), cPdfFile )
-   
-   If lSuccess
-      ? "Sucesso! O arquivo " + cPdfFile + " foi gerado."
-   Else
-      ? "Falha ao gerar o PDF."
-   Endif
-   
-RETURN
-#include "hbclass.ch"
-#include "hbzebra.ch"
-#include "harupdf.ch"
-
-// ============================================================================
-// PROGRAMA DE TESTE
-// ============================================================================
-PROCEDURE Main02()
-   Local oConverter
-   Local cZplString, cZplFile := "teste.zpl"
-   Local cPdfFile := "teste.pdf"
-   Local lSuccess
-
-   // Cria um ZPL de exemplo e salva no disco para simular o teste
-   cZplString := "^XA" + hb_Eol() + ;
-                 "^FX Top section com logo e texto reverso" + hb_Eol() + ;
-                 "^CF0,60" + hb_Eol() + ;
-                 "^FO50,50^GB100,100,100^FS" + hb_Eol() + ;
-                 "^FO75,75^FR^GB100,100,100^FS" + hb_Eol() + ;
-                 "^FO93,93^GB40,40,40^FS" + hb_Eol() + ;
-                 "^FO220,50^FDIntershipping, Inc.^FS" + hb_Eol() + ;
-                 "^CF0,30" + hb_Eol() + ;
-                 "^FO220,115^FD1000 Shipping Lane^FS" + hb_Eol() + ;
-                 "^FO50,250^GB700,3,3^FS" + hb_Eol() + ;
-                 "^FX Secao de codigo de barras" + hb_Eol() + ;
-                 "^BY5,2,270" + hb_Eol() + ;
-                 "^FO100,550^BC^FD12345678^FS" + hb_Eol() + ;
-                 "^FX Letra Gigante CA" + hb_Eol() + ;
-                 "^CF0,190" + hb_Eol() + ;
-                 "^FO470,955^FDCA^FS" + hb_Eol() + ;
-                 "^XZ"
-                 
-   hb_MemoWrit( cZplFile, cZplString )
-   
-   ? "Iniciando conversao de ZPL para PDF..."
-   
-   // Instancia a classe informando a densidade padrao (203 DPI)
-   oConverter := TZebraToPdf():New( 203 )
-   lSuccess := oConverter:Generate( hb_MemoRead( cZplFile ), cPdfFile )
-   
-   If lSuccess
-      ? "Sucesso! O arquivo " + cPdfFile + " foi gerado."
-   Else
-      ? "Falha ao gerar o PDF."
-   Endif
-   
-RETURN
 
 // ============================================================================
 // CLASSE COMPLETA: TZebraToPdf
@@ -292,21 +210,21 @@ METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
    Endif
 Return Nil
 
+
 METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
    Local hZebra, nFlags := 0
-   Local bDraw
    Local x := ::MM_X( ::nX )
    Local y := ::MM_Y( ::nY ) 
-   
    Local hFont, nTextSize := 12
-   Local nBarHReal := ::nBarHeight * ::nScale
-   Local yText := y - nBarHReal - 15
    
-   Local nTextWidth, nCenterTextX, nTotalWidth
-   
-   // LARGURA ESTÁVEL DE MÓDULO: Usamos a proporção exata nativa calculada pelo nScale
-   // sem multiplicadores empíricos que alteram o grid lógico do hb_zebra.
-   Local nCurrentBarWidth := Max( ::nBarWidth * ::nScale, 1.0 )
+   Local nRawHeight, nPdfBarHeight, nBottomY
+   Local nWidthFactor, nTextWidth, nCenterTextX
+   Local nHarbourModules := 0, nActualWidth
+
+   // Altura real baseada no comando ^BY do ZPL
+   nRawHeight := If( ValType(::nBarHeight) == "N" .AND. ::nBarHeight > 0, ::nBarHeight, 100 )
+   nPdfBarHeight := Abs( ::MM_Y( nRawHeight ) - ::MM_Y( 0 ) )
+   nBottomY := y - nPdfBarHeight
 
    SWITCH cType
       CASE "BC"
@@ -322,32 +240,29 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
    If hZebra != Nil .AND. hb_zebra_geterror( hZebra ) == 0
       HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
       
-      nMaxX := x 
-
-      bDraw := {| nBarX, nBarY, nBarW, nBarH | ;
-                  nMaxX := Max( nMaxX, nBarX + nBarW ), ;
-                  HPDF_Page_Rectangle( ::hPage, nBarX, nBarY - nBarH, nBarW, nBarH ), ;
-                  HPDF_Page_Fill( ::hPage ) }
-
-      // Desenha o código usando a largura padrão estável
-      hb_zebra_draw( hZebra, bDraw, x, y, nCurrentBarWidth, nBarHReal )
-      
-      // Se porventura a varredura do bloco não capturar, usamos uma largura base segura para o Code 128
-      nTotalWidth := nMaxX - x
-      If nTotalWidth <= 0
-         // 11 é o número médio padrão de módulos por caractere no Code 128
-         nTotalWidth := Len( cData ) * 11 * nCurrentBarWidth 
+      // Conta os módulos lógicos do hb_zebra
+      hb_zebra_draw( hZebra, {| cx, cy, cw, ch | nHarbourModules := Max(cx + cw, nHarbourModules) }, 0, 0, 1, 1 )
+      If nHarbourModules <= 0
+         nHarbourModules := 100
       Endif
 
-      // Centralização geométrica exata do texto abaixo das barras
-      hFont := HPDF_GetFont( ::hPdf, "Helvetica", "WinAnsiEncoding" )
+      // Fator de proporção idêntico ao modelo oficial de referência do seu DANFE
+      nWidthFactor := ::nScale * 0.9
+
+      // Desenha as barras respeitando a coordenada exata do box (^FO)
+      hb_zebra_draw( hZebra, {| bx, by, bw, bh | HPDF_Page_Rectangle( ::hPage, bx, by, bw, bh ) }, x, nBottomY, nWidthFactor, nPdfBarHeight )
+      HPDF_Page_Fill( ::hPage )
+
+      // Centraliza o texto milimetricamente embaixo do código
+      nActualWidth := nHarbourModules * nWidthFactor
+      hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
       HPDF_Page_SetFontAndSize( ::hPage, hFont, nTextSize )
       
       nTextWidth := HPDF_Page_TextWidth( ::hPage, cData )
-      nCenterTextX := x + (nTotalWidth / 2) - (nTextWidth / 2)
+      nCenterTextX := x + (nActualWidth / 2) - (nTextWidth / 2)
       
       HPDF_Page_BeginText( ::hPage )
-      HPDF_Page_TextOut( ::hPage, nCenterTextX, yText, cData ) 
+      HPDF_Page_TextOut( ::hPage, nCenterTextX, nBottomY - 15, cData ) 
       HPDF_Page_EndText( ::hPage )
       
       hb_zebra_destroy( hZebra )
