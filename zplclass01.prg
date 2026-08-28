@@ -22,7 +22,7 @@ CLASS TZebraToPdf
    DATA lReverse INIT .F.
 
    METHOD New( nDpi ) CONSTRUCTOR
-   METHOD Generate( cZplText, cPdfFile, aCAMVALOR ) // Atualizado
+   METHOD Generate( cZplText, cPdfFile )
    METHOD ParseCommand( cCmd )
    METHOD DrawTextZPL( cText )
    METHOD DrawBoxZPL( nW, nH, nThickness )
@@ -39,52 +39,9 @@ METHOD New( nDpi ) CLASS TZebraToPdf
 Return Self
 
 
-METHOD Generate( cZplText, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
+METHOD Generate( cZplText, cPdfFile ) CLASS TZebraToPdf
    Local aLines, cLine, aCmds, i, j
    Local lIgnoreBin := .F.
-   Local aItem, cKey, uVal, cValStr
-
-   // ==========================================================
-   // SUBSTITUIÇÃO DE VARIÁVEIS (@) - Tipagem Dinâmica
-   // ==========================================================
-   If ValType( aCAMVALOR ) == "A"
-      For i := 1 To Len( aCAMVALOR )
-         aItem := aCAMVALOR[ i ]
-         
-         If ValType( aItem ) == "A" .AND. Len( aItem ) >= 2
-            cKey := aItem[ 1 ]
-            uVal := aItem[ 2 ]
-            
-            If ValType( cKey ) == "C"
-               // Garante que a chave inicie com "@" para buscar corretamente no ZPL
-               cKey := If( Left( cKey, 1 ) == "@", cKey, "@" + cKey )
-               
-               // Tratamento de Tipagem para conversão em String
-               SWITCH ValType( uVal )
-                  CASE "C" // Caractere
-                     cValStr := uVal
-                     EXIT
-                  CASE "N" // Numérico
-                     cValStr := AllTrim( Str( uVal ) )
-                     EXIT
-                  CASE "D" // Data
-                     cValStr := DToC( uVal )
-                     EXIT
-                  CASE "L" // Lógico
-                     cValStr := If( uVal, "S", "N" )
-                     EXIT
-                  OTHERWISE
-                     cValStr := hb_ValToStr( uVal ) // Fallback seguro do Harbour
-               ENDSWITCH
-               
-               // Substitui a tag na string ZPL (testa exato e maiúsculo para segurança)
-               cZplText := StrTran( cZplText, cKey, cValStr )
-               cZplText := StrTran( cZplText, Upper( cKey ), cValStr )
-            Endif
-         Endif
-      Next i
-   Endif
-   // ==========================================================
 
    ::hPdf := HPDF_New()
    If Empty(::hPdf)
@@ -128,6 +85,7 @@ METHOD Generate( cZplText, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
    HPDF_SaveToFile( ::hPdf, cPdfFile )
    HPDF_Free( ::hPdf )
 Return Hb_FileExists(cPdfFile)
+
 
 METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    Local cOpcode := Left(cCmd, 2)
@@ -229,16 +187,6 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       CASE "B7" // PDF417
          ::cBarcodeType := "B7"
          EXIT
-         
-      CASE "XG" // Recall Graphic
-      CASE "ID" // Image Delete
-         EXIT
-         
-      CASE "BQ" // QR Code
-         ::cBarcodeType := "BQ"
-         EXIT    
-         
-         
    ENDSWITCH
 Return Nil
 
@@ -262,7 +210,6 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
       CASE "B3"; hZebra := hb_zebra_create_code39( cData, nFlags ); EXIT
       CASE "BX"; hZebra := hb_zebra_create_datamatrix( cData, nFlags ); EXIT
       CASE "B7"; hZebra := hb_zebra_create_pdf417( cData, nFlags ); EXIT
-      CASE "BQ"; hZebra := hb_zebra_create_qrcode( cData, nFlags ); EXIT
       OTHERWISE; hZebra := hb_zebra_create_code128( cData, nFlags )
    ENDSWITCH
 
@@ -274,14 +221,7 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
          nHarbourModules := 100
       Endif
 
-      
       nWidthFactor := ::nScale * 0.9
-      
-      // MANTÉM A PROPORÇÃO QUADRADA PARA CÓDIGOS 2D
-      If cType $ "BX|B7|BQ"
-         nPdfBarHeight := nWidthFactor
-      Endif
-
 
       hb_zebra_draw( hZebra, {| bx, by, bw, bh | HPDF_Page_Rectangle( ::hPage, bx, by, bw, bh ) }, x, nBottomY, nWidthFactor, nPdfBarHeight )
       HPDF_Page_Fill( ::hPage )

@@ -1,0 +1,8 @@
+*.exe
+*.log
+*.o
+*.reso
+*.dll
+*.a
+/lib/win/mingw/.hbmk
+/lib/win/mingw64/.hbmk
