@@ -344,74 +344,11 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    ENDSWITCH
 Return Nil
 
-METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
-   Local hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
-   Local x := ::MM_X( ::nX )
-   Local nPdfFontSize := ::nFontSize * ::nScale 
-   Local y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
-
-   If ::lReverse
-      HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
-   Else
-      HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
-   Endif
-
-   HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
-   HPDF_Page_BeginText( ::hPage )
-   
-   
-   // Matriz de Rotação (a, b, c, d, x, y)
-   SWITCH ::cOrientation
-      CASE "R" // 90 graus sentido horário
-         HPDF_Page_SetTextMatrix( ::hPage, 0, -1, 1, 0, x, y )
-         EXIT
-      CASE "I" // 180 graus invertido
-         HPDF_Page_SetTextMatrix( ::hPage, -1, 0, 0, -1, x, y )
-         EXIT
-      CASE "B" // 270 graus (Bottom-Up / 90 graus anti-horário)
-         HPDF_Page_SetTextMatrix( ::hPage, 0, 1, -1, 0, x, y )
-         EXIT
-      OTHERWISE // Normal
-         HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, x, y )
-   ENDSWITCH
-   
-   HPDF_Page_ShowText( ::hPage, cText )
-   //HPDF_Page_TextOut( ::hPage, x, y, cText )
-   HPDF_Page_EndText( ::hPage )
-Return Nil
-
-
-METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
-   Local x := ::MM_X( ::nX )
-   Local y := ::MM_Y( ::nY )
-   Local w := nW * ::nScale
-   Local h := nH * ::nScale
-   Local t := nThickness * ::nScale
-   
-   // Simulação nativa do ^FR (XOR): Pinta de branco sobre o fundo preto
-   If ::lReverse
-      HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
-      HPDF_Page_SetRGBStroke( ::hPage, 1, 1, 1 )
-   Else
-      HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
-      HPDF_Page_SetRGBStroke( ::hPage, 0, 0, 0 )
-   Endif
-
-   If nThickness >= (nW / 2) .OR. nThickness >= (nH / 2)
-      HPDF_Page_Rectangle( ::hPage, x, y - h, w, h )
-      HPDF_Page_Fill( ::hPage )
-   Else
-      HPDF_Page_SetLineWidth( ::hPage, Max(t, 0.5) )
-      HPDF_Page_Rectangle( ::hPage, x + (t/2), y - h + (t/2), w - t, h - t )
-      HPDF_Page_Stroke( ::hPage )
-   Endif
-Return Nil
-
 METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
    LOCAL hZebra, nFlags := 0
    LOCAL x := ::MM_X( ::nX )
    LOCAL y := ::MM_Y( ::nY ) 
-   LOCAL hFont, nPdfFontSize
+   LOCAL hFont, nTextSize := 12
    LOCAL nRawHeight, nPdfBarHeight
    LOCAL nWidthFactor, nTextWidth, nCenterTextX
    LOCAL nHarbourModules := 0, nActualWidth
@@ -430,13 +367,7 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
    ENDSWITCH
 
    If hZebra != Nil .AND. hb_zebra_geterror( hZebra ) == 0
-      If ::lReverse
-         HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
-         HPDF_Page_SetRGBStroke( ::hPage, 1, 1, 1 )
-      Else
-         HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
-         HPDF_Page_SetRGBStroke( ::hPage, 0, 0, 0 )
-      Endif
+      ::ApplyReverseState() 
       
       hb_zebra_draw( hZebra, {| cx, cy, cw, ch | nHarbourModules := Max(cx + cw, nHarbourModules) }, 0, 0, 1, 1 )
       If nHarbourModules <= 0
@@ -474,17 +405,19 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
       If lShowText .AND. ::lPrintBarcodeText
          nActualWidth := nHarbourModules * nWidthFactor
          hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
-         
-         // Fix: Escala proporcional do texto em relação ao DPI da etiqueta
-         nPdfFontSize := 30 * ::nScale 
-         HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
+         HPDF_Page_SetFontAndSize( ::hPage, hFont, nTextSize )
          
          nTextWidth := HPDF_Page_TextWidth( ::hPage, cData )
          nCenterTextX := (nActualWidth / 2) - (nTextWidth / 2)
          
+         If ::lReverse
+            HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
+         Else
+            HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
+         Endif
+         
          HPDF_Page_BeginText( ::hPage )
-         HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, nCenterTextX, -nPdfBarHeight - (nPdfFontSize * 1.0) )
-         HPDF_Page_ShowText( ::hPage, cData ) 
+         HPDF_Page_TextOut( ::hPage, nCenterTextX, -nPdfBarHeight - 15, cData ) 
          HPDF_Page_EndText( ::hPage )
       Endif
       
@@ -492,6 +425,62 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
       hb_zebra_destroy( hZebra )
    Endif
 Return Nil
+
+METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
+   Local hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
+   Local x := ::MM_X( ::nX )
+   Local nPdfFontSize := ::nFontSize * ::nScale 
+   Local y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
+
+   If ::lReverse
+      HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
+   Else
+      HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
+   Endif
+
+   HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
+   HPDF_Page_BeginText( ::hPage )
+   
+   
+   // Matriz de Rotação (a, b, c, d, x, y)
+   SWITCH ::cOrientation
+      CASE "R" // 90 graus sentido horário
+         HPDF_Page_SetTextMatrix( ::hPage, 0, -1, 1, 0, x, y )
+         EXIT
+      CASE "I" // 180 graus invertido
+         HPDF_Page_SetTextMatrix( ::hPage, -1, 0, 0, -1, x, y )
+         EXIT
+      CASE "B" // 270 graus (Bottom-Up / 90 graus anti-horário)
+         HPDF_Page_SetTextMatrix( ::hPage, 0, 1, -1, 0, x, y )
+         EXIT
+      OTHERWISE // Normal
+         HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, x, y )
+   ENDSWITCH
+   
+   HPDF_Page_ShowText( ::hPage, cText )
+   //HPDF_Page_TextOut( ::hPage, x, y, cText )
+   HPDF_Page_EndText( ::hPage )
+Return Nil
+
+METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
+   Local x := ::MM_X( ::nX )
+   Local y := ::MM_Y( ::nY )
+   Local w := nW * ::nScale
+   Local h := nH * ::nScale
+   Local t := nThickness * ::nScale
+   
+   ::ApplyReverseState() // <- Substitui os IFs antigos de cor
+
+   If nThickness >= (nW / 2) .OR. nThickness >= (nH / 2)
+      HPDF_Page_Rectangle( ::hPage, x, y - h, w, h )
+      HPDF_Page_Fill( ::hPage )
+   Else
+      HPDF_Page_SetLineWidth( ::hPage, Max(t, 0.5) )
+      HPDF_Page_Rectangle( ::hPage, x + (t/2), y - h + (t/2), w - t, h - t )
+      HPDF_Page_Stroke( ::hPage )
+   Endif
+Return Nil
+
 
 METHOD MM_X( nDotX ) CLASS TZebraToPdf
 Return (nDotX * ::nScale)
