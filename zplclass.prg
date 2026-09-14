@@ -3,7 +3,7 @@
 #include "harupdf.ch"
 
 // ============================================================================
-// CLASSE COMPLETA: TZebraToPdf (Ajuste de Métricas e Estouro de Layout)
+// CLASSE COMPLETA: TZebraToPdf (Com fix de Background para Efeito XOR/FR)
 // ============================================================================
 CLASS TZebraToPdf
    DATA hPdf
@@ -163,6 +163,16 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          HPDF_Page_SetWidth( ::hPage, 812 * ::nScale ) // Fallback 4x6"
          HPDF_Page_SetHeight( ::hPage, 1218 * ::nScale ) 
          ::nHeight := HPDF_Page_GetHeight( ::hPage )
+         
+         // ========================================================
+         // FIX: Forçar fundo branco opaco em toda a etiqueta
+         // Isso garante que o cálculo de Diferença matemática do 
+         // ^FR (XOR) funcione corretamente no PDF
+         // ========================================================
+         HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
+         HPDF_Page_Rectangle( ::hPage, 0, 0, HPDF_Page_GetWidth( ::hPage ), ::nHeight )
+         HPDF_Page_Fill( ::hPage )
+         HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) // Restaura preto padrão
          EXIT
          
       CASE "CF"
@@ -311,14 +321,10 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
 Return Nil
 
 METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
-   // Restaurado para Helvetica-Bold. A fonte ZPL 0 é proporcional. 
-   // Courier (monoespaçada) causava o estouro horizontal ("Intershipping, Inc." cortado).
    Local hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
    Local x := ::MM_X( ::nX )
    Local nPdfFontSize := ::nFontSize * ::nScale 
    
-   // Restaurado o cálculo com 0.8 (Ascent).
-   // O PDF alinha a base da fonte. Subtrair 100% (- nPdfFontSize) joga o texto baixo demais.
    Local y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
 
    ::ApplyReverseState()
@@ -434,7 +440,6 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
          nCenterTextX := (nActualWidth / 2) - (nTextWidth / 2)
          
          HPDF_Page_BeginText( ::hPage )
-         // O multiplicador 1.0 (altura exata) garante que o texto grude levemente abaixo do código de barras
          HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, nCenterTextX, -nPdfBarHeight - (nPdfFontSize * 1.0) )
          HPDF_Page_ShowText( ::hPage, cData ) 
          HPDF_Page_EndText( ::hPage )
@@ -452,9 +457,6 @@ METHOD MM_Y( nDotY ) CLASS TZebraToPdf
 Return ::nHeight - (nDotY * ::nScale)
 
 
-// ============================================================================
-// Processador de Escapes Hexadecimais (ZPL CP850 -> HaruPDF WinAnsi)
-// ============================================================================
 METHOD DecodeZPLHex( cText ) CLASS TZebraToPdf
    Local nPos, cHex, cChar
    
