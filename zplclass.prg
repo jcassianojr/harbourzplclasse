@@ -200,12 +200,11 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       Return Nil
    Endif
 
-// Tratamento para ^CF (Define a fonte padrão e salva seu estado persistente)
+   // Tratamento para ^CF (Define a fonte padrão e salva seu estado persistente)
    If Upper(Left(cCmd, 2)) == "CF"
       cFontID := "A" 
       cRest := SubStr(cCmd, 3)
       
-      // Identifica se o caractere é uma fonte válida[cite: 42]
       If Len(cRest) >= 1 .AND. (SubStr(cRest, 1, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
          cFontID := SubStr(cRest, 1, 1)
          cRest := SubStr(cRest, 2)
@@ -217,15 +216,24 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       
       aParams := hb_ATokens( AllTrim(cRest), "," )
       
-      // Inicializa a memória da fonte se for o primeiro uso
       If !hb_HHasKey( ::hFontStates, cFontID )
          ::hFontStates[ cFontID ] := { 15, 15 } // { Altura, Largura }
       Endif
       
-      // Atualiza a memória da fonte APENAS se o parâmetro foi declarado explicitamente
+      // 1. Atualiza Altura e auto-ajusta a Largura caso ela tenha sido omitida no ZPL
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::hFontStates[ cFontID ][1] := Val(aParams[1])
+         
+         If Len(aParams) < 2 .OR. Empty(aParams[2]) .OR. Val(aParams[2]) <= 0
+            IF cFontID == "0"
+               ::hFontStates[ cFontID ][2] := Val(aParams[1]) // Fonte 0 -> proporção 1:1
+            ELSE
+               ::hFontStates[ cFontID ][2] := Val(aParams[1]) * 0.6 // Fontes A-Z -> proporção 0.6:1
+            ENDIF
+         Endif
       Endif
+      
+      // 2. Se a largura for passada explicitamente, sobrescreve o auto-ajuste
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::hFontStates[ cFontID ][2] := Val(aParams[2])
       Endif
@@ -239,7 +247,7 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       Return Nil
    Endif
 
-   // Tratamento para ^A (Invoca temporariamente uma fonte e gerencia omissões)
+   // Tratamento para ^A (Invoca temporariamente uma fonte para o campo atual)
    If Upper(Left(cCmd, 1)) == "A" .AND. Len(cCmd) >= 2 .AND. (SubStr(cCmd, 2, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@")
       cFontID := SubStr(cCmd, 2, 1)
       cRest := SubStr(cCmd, 3)
@@ -267,10 +275,20 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       ::nFontHeight := ::hFontStates[ cFontID ][1]
       ::nFontWidth  := ::hFontStates[ cFontID ][2]
       
-      // 2. Sobrescreve apenas se as medidas foram informadas no comando ^A
+      // 2. Atualiza Altura temporária e auto-ajusta Largura temporária se omitida
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::nFontHeight := Val(aParams[1])
+         
+         If Len(aParams) < 2 .OR. Empty(aParams[2]) .OR. Val(aParams[2]) <= 0
+            IF cFontID == "0"
+               ::nFontWidth := Val(aParams[1])
+            ELSE
+               ::nFontWidth := Val(aParams[1]) * 0.6
+            ENDIF
+         Endif
       Endif
+      
+      // 3. Se informou a largura, sobrescreve
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::nFontWidth := Val(aParams[2])
       Endif
@@ -391,39 +409,45 @@ Return Nil
 
 METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
    Local cFontName := "Helvetica-Bold"
-   Local hFont, x, y, nPdfFontSize
+   Local hFont, x, y, nPdfFontSize, nHScale
 
-   // Define a família da fonte sem afetar as proporções matemáticas
+   // Fonte 0 = Negrito (Escalável)
+   // Fontes A-Z = Regular (Matricial)
    IF ::cCurrentFont == "0"
       cFontName := "Helvetica-Bold" 
    ELSE
-      cFontName := "Helvetica"      
+      cFontName := "Helvetica" // Revertido para remover o negrito indesejado
    ENDIF
 
    hFont := HPDF_GetFont( ::hPdf, cFontName, "WinAnsiEncoding" )
    
    x := ::MM_X( ::nX )
    nPdfFontSize := ::nFontSize * ::nScale 
+   
    y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
+
+   nHScale := 1.0
+   IF ::nFontHeight > 0 .AND. ::nFontWidth > 0 
+      nHScale := ::nFontWidth / (::nFontHeight * If(::cCurrentFont == "0", 1.0, 0.6))
+   ENDIF
 
    ::ApplyReverseState()
 
    HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
    HPDF_Page_BeginText( ::hPage )
    
-   // Matriz original restaurada (escala 1 fixa) para não distorcer as posições
    SWITCH ::cOrientation
       CASE "R" 
-         HPDF_Page_SetTextMatrix( ::hPage, 0, -1, 1, 0, x, y )
+         HPDF_Page_SetTextMatrix( ::hPage, 0, -1, nHScale, 0, x, y )
          EXIT
       CASE "I" 
-         HPDF_Page_SetTextMatrix( ::hPage, -1, 0, 0, -1, x, y )
+         HPDF_Page_SetTextMatrix( ::hPage, -nHScale, 0, 0, -1, x, y )
          EXIT
       CASE "B" 
-         HPDF_Page_SetTextMatrix( ::hPage, 0, 1, -1, 0, x, y )
+         HPDF_Page_SetTextMatrix( ::hPage, 0, 1, -nHScale, 0, x, y )
          EXIT
       OTHERWISE 
-         HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, x, y )
+         HPDF_Page_SetTextMatrix( ::hPage, nHScale, 0, 0, 1, x, y )
    ENDSWITCH
    
    HPDF_Page_ShowText( ::hPage, cText )
