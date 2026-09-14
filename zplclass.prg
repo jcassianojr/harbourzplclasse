@@ -3,7 +3,7 @@
 #include "harupdf.ch"
 
 // ============================================================================
-// CLASSE COMPLETA: TZebraToPdf (Lógica Universal para Fontes ^CF e ^A)
+// CLASSE COMPLETA: TZebraToPdf (Parser de Fontes CF Robusto + FREADLINE)
 // ============================================================================
 CLASS TZebraToPdf
    DATA hPdf
@@ -26,9 +26,15 @@ CLASS TZebraToPdf
    DATA lPrintBarcodeText INIT .T.
    DATA hExtReverse INIT Nil
    DATA hExtNormal INIT Nil
+   
+   
+   DATA hFontStates INIT {=>} 
+   DATA cCurrentFont INIT "A"
+   DATA nFontHeight INIT 15
+   DATA nFontWidth INIT 15
 
    METHOD New( nDpi ) CONSTRUCTOR
-   METHOD Generate( cZplText, cPdfFile, aCAMVALOR ) 
+   METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) 
    METHOD ParseCommand( cCmd )
    METHOD DrawTextZPL( cText )
    METHOD DrawBoxZPL( nW, nH, nThickness )
@@ -147,13 +153,12 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
          FClose( nFileUso )
       Endif
    Else
-      // Caso receba o ZPL diretamente como string, quebra pelas linhas usando hb_ATokens com Chr(10)
+      // Caso receba o ZPL diretamente como string
       cZplText := StrTran( cZplTextOrFile, "~", "^" )
       aLines := hb_ATokens( cZplText, Chr(10) )
       
       For i := 1 To Len(aLines)
          cLine := AllTrim(aLines[i])
-         // Remove eventuais rastros de Chr(13) caso venha misturado na string
          cLine := StrTran( cLine, Chr(13), "" )
          
          If Left(cLine, 3) == "~DG" .OR. Left(cLine, 4) == "^GFA"
@@ -186,43 +191,94 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
 Return Hb_FileExists(cPdfFile)
 
 METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
-   Local cOpcode, cParams, aParams, cCleanNum, i, cChar
+   Local cParams, aParams, cRest, k, cOpcode
+   Local cFontID
+   Local cOrient
 
    cCmd := AllTrim(cCmd)
    If Empty(cCmd)
       Return Nil
    Endif
 
-   // Identifica se o comando começa com CF (cobrindo ^CF, ^CFA, ^CF0, etc.)
+// Tratamento para ^CF (Define a fonte padrão e salva seu estado persistente)
    If Upper(Left(cCmd, 2)) == "CF"
-      // Se o 3 caractere for letra ou número (ex: CFA ou CF0), o opcode tem 3 chars
-      If Len(cCmd) >= 3 .AND. (SubStr(cCmd, 3, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-         cOpcode := Upper(Left(cCmd, 3))
-         cParams := SubStr(cCmd, 4)
-      Else
-         cOpcode := Upper(Left(cCmd, 2))
-         cParams := SubStr(cCmd, 3)
+      cFontID := "A" 
+      cRest := SubStr(cCmd, 3)
+      
+      // Identifica se o caractere é uma fonte válida[cite: 42]
+      If Len(cRest) >= 1 .AND. (SubStr(cRest, 1, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+         cFontID := SubStr(cRest, 1, 1)
+         cRest := SubStr(cRest, 2)
       Endif
-
-      // Extrai o primeiro bloco numérico encontrado após o comando de fonte
-      cCleanNum := ""
-      For i := 1 To Len(cParams)
-         cChar := SubStr(cParams, i, 1)
-         If cChar >= "0" .AND. cChar <= "9"
-            cCleanNum += cChar
-         ElseIf !Empty(cCleanNum)
-            // Para ao encontrar o primeiro caractere não numérico após o número (ex: a vírgula da largura)
-            EXIT
-         Endif
-      Next i
-
-      If !Empty(cCleanNum) .AND. Val(cCleanNum) > 0
-         ::nFontSize := Val(cCleanNum)
+      
+      If Left(cRest, 1) == ","
+         cRest := SubStr(cRest, 2)
       Endif
+      
+      aParams := hb_ATokens( AllTrim(cRest), "," )
+      
+      // Inicializa a memória da fonte se for o primeiro uso
+      If !hb_HHasKey( ::hFontStates, cFontID )
+         ::hFontStates[ cFontID ] := { 15, 15 } // { Altura, Largura }
+      Endif
+      
+      // Atualiza a memória da fonte APENAS se o parâmetro foi declarado explicitamente
+      If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
+         ::hFontStates[ cFontID ][1] := Val(aParams[1])
+      Endif
+      If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
+         ::hFontStates[ cFontID ][2] := Val(aParams[2])
+      Endif
+      
+      // Define a fonte atual e passa os dados da memória para as variáveis ativas
+      ::cCurrentFont := cFontID
+      ::nFontHeight  := ::hFontStates[ cFontID ][1]
+      ::nFontWidth   := ::hFontStates[ cFontID ][2]
+      ::nFontSize    := ::nFontHeight 
+      
       Return Nil
    Endif
 
-   // Demais comandos normais de 2 letras
+   // Tratamento para ^A (Invoca temporariamente uma fonte e gerencia omissões)
+   If Upper(Left(cCmd, 1)) == "A" .AND. Len(cCmd) >= 2 .AND. (SubStr(cCmd, 2, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@")
+      cFontID := SubStr(cCmd, 2, 1)
+      cRest := SubStr(cCmd, 3)
+      
+      cOrient := "N"
+      If Len(cRest) >= 1 .AND. (SubStr(cRest, 1, 1) $ "NRIB")
+         cOrient := SubStr(cRest, 1, 1)
+         cRest := SubStr(cRest, 2)
+      Endif
+      
+      If Left(cRest, 1) == ","
+         cRest := SubStr(cRest, 2)
+      Endif
+      
+      aParams := hb_ATokens( AllTrim(cRest), "," )
+      
+      If !hb_HHasKey( ::hFontStates, cFontID )
+         ::hFontStates[ cFontID ] := { 15, 15 }
+      Endif
+      
+      ::cCurrentFont := cFontID
+      ::cOrientation := cOrient
+      
+      // 1. Carrega as dimensões herdadas salvas para esta fonte específica
+      ::nFontHeight := ::hFontStates[ cFontID ][1]
+      ::nFontWidth  := ::hFontStates[ cFontID ][2]
+      
+      // 2. Sobrescreve apenas se as medidas foram informadas no comando ^A
+      If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
+         ::nFontHeight := Val(aParams[1])
+      Endif
+      If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
+         ::nFontWidth := Val(aParams[2])
+      Endif
+      
+      ::nFontSize := ::nFontHeight
+      Return Nil
+   Endif
+
    cOpcode := Upper(Left(cCmd, 2))
    cParams := SubStr(cCmd, 3)
    aParams := hb_ATokens( cParams, "," )
@@ -334,17 +390,28 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
 Return Nil
 
 METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
-   Local hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
-   Local x := ::MM_X( ::nX )
-   Local nPdfFontSize := ::nFontSize * ::nScale 
+   Local cFontName := "Helvetica-Bold"
+   Local hFont, x, y, nPdfFontSize
+
+   // Define a família da fonte sem afetar as proporções matemáticas
+   IF ::cCurrentFont == "0"
+      cFontName := "Helvetica-Bold" 
+   ELSE
+      cFontName := "Helvetica"      
+   ENDIF
+
+   hFont := HPDF_GetFont( ::hPdf, cFontName, "WinAnsiEncoding" )
    
-   Local y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
+   x := ::MM_X( ::nX )
+   nPdfFontSize := ::nFontSize * ::nScale 
+   y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
 
    ::ApplyReverseState()
 
    HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
    HPDF_Page_BeginText( ::hPage )
    
+   // Matriz original restaurada (escala 1 fixa) para não distorcer as posições
    SWITCH ::cOrientation
       CASE "R" 
          HPDF_Page_SetTextMatrix( ::hPage, 0, -1, 1, 0, x, y )
@@ -362,7 +429,6 @@ METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
    HPDF_Page_ShowText( ::hPage, cText )
    HPDF_Page_EndText( ::hPage )
 Return Nil
-
 
 METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
    Local x := ::MM_X( ::nX )
@@ -469,7 +535,6 @@ Return (nDotX * ::nScale)
 METHOD MM_Y( nDotY ) CLASS TZebraToPdf
 Return ::nHeight - (nDotY * ::nScale)
 
-
 METHOD DecodeZPLHex( cText ) CLASS TZebraToPdf
    Local nPos, cHex, cChar
    
@@ -495,7 +560,6 @@ METHOD DecodeZPLHex( cText ) CLASS TZebraToPdf
    ::cHexPrefix := "" 
    
 Return cText
-
 
 METHOD ConvertCP850ToWinAnsi( cHex ) CLASS TZebraToPdf
    Local nNum := hb_HexToNum( cHex )
@@ -580,3 +644,102 @@ FUNCTION StripBBCode( cLinha )
    ENDDO
 
 RETURN cLinha
+
+
+// ============================================================================
+// FUNÇÕES SUPORTE (FREADLINE, FDELIM, SplitCommaAspas)
+// ============================================================================
+
+STATIC FUNCTION FREADLINE( handle, line_len, lremchrexp, cDELI )
+
+   LOCAL buffer, line_end, num_bytes, cRETU
+
+   IF ValType( line_len ) <> 'N'
+      line_len := 1024
+   ENDIF
+   IF ValType( lremchrexp ) <> "L"
+      lREMCHREXP := .T.
+   ENDIF
+   IF ValType( cDELI ) <> "C"
+      cDELI := Chr( 13 ) + Chr( 10 )
+   ENDIF
+   cRETU := ""
+   buffer := Space( line_len )
+   num_bytes := FRead( handle, @buffer, line_len )
+   line_end := At( cDELI, buffer )
+   
+   IF line_end = 0
+      FSeek( handle, 0 )
+      RETURN ( '__FINAL__' )
+   ELSE
+      IF cDELI = Chr( 10 )
+         FSeek( handle, ( num_bytes * -1 ) + line_end, 1 )  
+      ELSE
+         FSeek( handle, ( num_bytes * -1 ) + line_end + 1, 1 )  
+      ENDIF
+      
+      IF lREMCHREXP
+         cRETU := SubStr( buffer, 1, line_end - 1 )
+         cRETU := RANGEREPL( Chr( 0 ), Chr( 9 ), cRETU, " " )   
+         cRETU := RANGEREPL( Chr( 11 ), Chr( 12 ), cRETU, " " )   
+         cRETU := RANGEREPL( Chr( 14 ), Chr( 31 ), cRETU, " " )   
+         cRETU := RANGEREPL( Chr( 127 ), Chr( 255 ), cRETU, " " )
+         RETURN cRETU
+      ELSE
+         RETURN ( SubStr( buffer, 1, line_end - 1 ) )
+      ENDIF
+   ENDIF
+RETURN cRETU
+
+STATIC FUNCTION FDELIM( cARQ, line_len, cPADRAO )
+
+   LOCAL buffer, line_end, num_bytes, nhandle, cRETU
+
+   IF ValType( line_len ) <> 'N'
+      line_len := 1024
+   ENDIF
+   cRETU := ""
+   buffer := Space( line_len )
+   nHANDLE := FOpen( cARQ )
+   num_bytes := FRead( nhandle, @buffer, line_len )
+   IF Empty( AllTrim( BUFFER ) )
+      buffer := FReadStr( nhandle, line_len )
+   ENDIF
+   FClose( NHANDLE )
+
+   line_end := At( Chr( 13 ) + Chr( 10 ), buffer )  
+   IF line_end > 0
+      cRETU := Chr( 13 ) + Chr( 10 )
+      RETURN cRETU
+   ENDIF
+
+   line_end := At( Chr( 10 ), buffer )  
+   IF line_end > 0
+      cRETU := Chr( 10 )
+      RETURN cRETU
+   ENDIF
+
+   line_end := At( Chr( 13 ), buffer )  
+   IF line_end > 0
+      cRETU := Chr( 13 )
+      RETURN cRETU
+   ENDIF
+
+   line_end := At( Chr( 255 ) + Chr( 254 ), buffer )
+   IF line_end > 0
+      cRETU := Chr( 255 ) + Chr( 254 )
+      RETURN cRETU
+   ENDIF
+
+   line_end := At( Chr( 239 ) + Chr( 187 ) + Chr( 191 ), buffer )
+   IF line_end > 0
+      cRETU := Chr( 239 ) + Chr( 187 ) + Chr( 191 )
+      RETURN cRETU
+   ENDIF
+
+   IF Empty( cRETU ) .AND. ValType( cPADRAO ) = "C"
+      cRETU := cPADRAO
+   ENDIF
+
+   RETURN cRETU
+
