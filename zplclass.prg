@@ -18,43 +18,45 @@ CLASS TZebraToPdf
    DATA hPage
    DATA hFont
    DATA nHeight
+   
+   // --- ESTADO GLOBAL DA ETIQUETA ---
    DATA nX INIT 0
    DATA nY INIT 0
+   DATA nLHx INIT 0       
+   DATA nLHy INIT 0       
    DATA nBarWidth INIT 2
    DATA nBarHeight INIT 100
-   
-   DATA nDpi INIT ZPL_DEFAULT_DPI
-   DATA nScale 
-   
-   DATA cBarcodeType INIT ""
-   DATA nFontSize INIT 15
-   DATA lReverse INIT .F.
-   
    DATA cGlobalOrient INIT "N"
-   DATA cOrientation INIT "N" 
-   
-   DATA cFieldOrient INIT ""
-   DATA nFieldHeight INIT 0
-   DATA lFieldPrintText INIT .T.
-   
-   DATA cHexPrefix INIT "" 
-   DATA lPrintBarcodeText INIT .T.
-   DATA hExtReverse INIT Nil
-   DATA hExtNormal INIT Nil
-   
-   DATA hFontStates INIT {=>} 
    DATA cCurrentFont INIT "A"
    DATA nFontHeight INIT 15
    DATA nFontWidth INIT 15
+   DATA nFontSize INIT 15
    
+   // --- ESTADO ESPECÍFICO DO CAMPO ---
+   DATA cOrientation INIT "N" 
+   DATA cFieldOrient INIT ""
+   DATA nFieldHeight INIT 0
+   DATA lFieldPrintText INIT .T.
+   DATA cBarcodeType INIT ""
+   DATA lReverse INIT .F.
    DATA lHexDecodeNextField INIT .F. 
-   
-   DATA nLHx INIT 0       
-   DATA nLHy INIT 0       
    DATA aFieldBlock       
+   DATA cHexPrefix INIT "" 
+   
+   // --- CONFIGURAÇÕES DO CONVERSOR ---
+   DATA nDpi INIT ZPL_DEFAULT_DPI
+   DATA nScale 
+   DATA lPrintBarcodeText INIT .T.
+   DATA hExtReverse INIT Nil
+   DATA hExtNormal INIT Nil
+   DATA hFontStates INIT {=>} 
 
    METHOD New( nDpi ) CONSTRUCTOR
    METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) 
+   
+   // Métodos de Gerenciamento de Estado (Virtual Printer)
+   METHOD ResetLabelState()
+   METHOD ClearFieldState()
    
    METHOD PreProcessZPL( cZPL )
    METHOD SplitLabels( cZPL )
@@ -66,6 +68,9 @@ CLASS TZebraToPdf
    METHOD DrawTextZPL( cText, aFieldBlock )
    METHOD DrawBoxZPL( nW, nH, nThickness )
    METHOD DrawBarcodeZPL( cData, cType )
+   METHOD DrawGraphicZPL( cData, nBytesPerRow ) 
+   METHOD DecompressZPLGraphic( cData, nBytesPerRow )
+   METHOD HexToBinStr( cHex )
    METHOD MM_X( nDotX )
    METHOD MM_Y( nDotY )
    METHOD DecodeZPLHex( cText )
@@ -81,6 +86,35 @@ METHOD New( nDpi ) CLASS TZebraToPdf
    Endif
    ::nScale := 72 / ::nDpi 
 Return Self
+
+METHOD ResetLabelState() CLASS TZebraToPdf
+   // Restaura a impressora para os padrões de fábrica a cada nova etiqueta (^XA)
+   ::nX := 0
+   ::nY := 0
+   ::nLHx := 0
+   ::nLHy := 0
+   ::nBarWidth := 2
+   ::nBarHeight := 100
+   ::cGlobalOrient := "N"
+   ::cCurrentFont := "A"
+   ::nFontHeight := 15
+   ::nFontWidth := 15
+   ::nFontSize := 15
+   ::ClearFieldState()
+Return Nil
+
+METHOD ClearFieldState() CLASS TZebraToPdf
+   // Limpa as formatações que só duram até o fim de um campo (^FS)
+   ::cOrientation := ::cGlobalOrient
+   ::cFieldOrient := ""
+   ::nFieldHeight := 0
+   ::lFieldPrintText := ::lPrintBarcodeText
+   ::cBarcodeType := ""
+   ::lReverse := .F.
+   ::lHexDecodeNextField := .F.
+   ::aFieldBlock := Nil
+   ::cHexPrefix := ""
+Return Nil
 
 METHOD ApplyReverseState() CLASS TZebraToPdf
    If ::lReverse
@@ -104,8 +138,8 @@ Return Nil
 
 METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
    Local cZplText := ""
-   Local aLabels, cLabel, aCmds, cItem
-   Local i, j, nPageWidth, nPageHeight
+   Local aLabels, cLabel, cCmdStr, cOpcode
+   Local i, nPos, nNextPos, nPageWidth, nPageHeight
    Local aItemData, cKey, uVal, cValStr
 
    If Hb_FileExists( cZplTextOrFile )
@@ -162,20 +196,53 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
       HPDF_Page_Fill( ::hPage )
       HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
 
-      ::lReverse := .F.
-      ::lHexDecodeNextField := .F.
-      ::cGlobalOrient := "N"
-      ::cCurrentFont := "A"
+      // Reinicia o estado para cada nova etiqueta processada
+      ::ResetLabelState()
 
-      aCmds := hb_ATokens( cLabel, "^" )
-      For j := 1 To Len(aCmds)
-         cItem := AllTrim(aCmds[j])
-         If !Empty(cItem)
-            If Left(cItem, 2) != "XA" .AND. Left(cItem, 2) != "XZ"
-               ::ParseCommand( cItem )
+      // ======================================================================
+      // PARSER DE FLUXO (LEXER SEGURO)
+      // ======================================================================
+      nPos := 1
+      While ( nPos := hb_At( "^", cLabel, nPos ) ) > 0
+         
+         cOpcode := Upper( SubStr( cLabel, nPos + 1, 2 ) )
+         
+         // BLOCO DE EXTRAÇÃO SEGURA PARA FIELD DATA (^FD)
+         If cOpcode == "FD"
+            nNextPos := hb_At( "^FS", Upper(cLabel), nPos + 1 )
+            If nNextPos > 0
+               cCmdStr := SubStr( cLabel, nPos + 1, nNextPos - nPos - 1 )
+               
+               cCmdStr := AllTrim( cCmdStr )
+               If !Empty( cCmdStr )
+                  ::ParseCommand( cCmdStr )
+               Endif
+               
+               nPos := nNextPos + 3 
+               LOOP
             Endif
          Endif
-      Next j
+         
+         // PROCESSAMENTO PADRÃO
+         nNextPos := hb_At( "^", cLabel, nPos + 1 )
+         
+         If nNextPos == 0
+            cCmdStr := SubStr( cLabel, nPos + 1 )
+            nPos := Len( cLabel ) + 1 
+         Else
+            cCmdStr := SubStr( cLabel, nPos + 1, nNextPos - nPos - 1 )
+            nPos := nNextPos 
+         Endif
+         
+         cCmdStr := AllTrim( cCmdStr )
+         
+         If !Empty( cCmdStr ) .AND. Left(cCmdStr, 2) != "XA" .AND. Left(cCmdStr, 2) != "XZ" .AND. Left(cCmdStr, 2) != "FS"
+            ::ParseCommand( cCmdStr )
+         Endif
+         
+      End
+      // ======================================================================
+
    Next i
 
    HPDF_SaveToFile( ::hPdf, cPdfFile )
@@ -264,10 +331,6 @@ METHOD DecodeFH( cText ) CLASS TZebraToPdf
 Return cResult
 
 METHOD ParseBarcodeParams( aParams, nPosO, nPosH, nPosT ) CLASS TZebraToPdf
-   ::cFieldOrient  := ""
-   ::nFieldHeight  := 0
-   ::lFieldPrintText := ::lPrintBarcodeText
-   
    If nPosO > 0 .AND. Len(aParams) >= nPosO .AND. !Empty(aParams[nPosO])
       ::cFieldOrient := aParams[nPosO]
    Endif
@@ -282,6 +345,7 @@ Return Nil
 METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    Local cParams, aParams, cRest, cOpcode
    Local cFontID, cOrient
+   Local nP1, nP2, nP3, nP4, cFmt, nRowBytes, cGData
 
    cCmd := AllTrim(cCmd)
    If Empty(cCmd)
@@ -410,15 +474,12 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          
          If !Empty( ::cBarcodeType )
             ::DrawBarcodeZPL( cParams, ::cBarcodeType )
-            ::cBarcodeType := ""
-            ::cFieldOrient := ""
-            ::nFieldHeight := 0
-            ::lFieldPrintText := ::lPrintBarcodeText
          Else
             ::DrawTextZPL( cParams, ::aFieldBlock )
          Endif
-         ::lReverse := .F. 
-         ::aFieldBlock := Nil
+         
+         // Limpa o field state (Virtual Printer reset command-to-command)
+         ::ClearFieldState()
          EXIT    
       CASE "GB"
          If Len(aParams) >= 3
@@ -426,17 +487,19 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          ElseIf Len(aParams) == 2
             ::DrawBoxZPL( Val(aParams[1]), Val(aParams[2]), 1 )
          Endif
-         ::lReverse := .F. 
+         ::ClearFieldState() 
          EXIT
       CASE "GC"
          If Len(aParams) >= 2
             ::DrawCircleZPL( Val(aParams[1]), Val(aParams[2]) )
          Endif
+         ::ClearFieldState()
          EXIT
       CASE "GE"
          If Len(aParams) >= 3
             ::DrawEllipseZPL( Val(aParams[1]), Val(aParams[2]), Val(aParams[3]) )
          Endif
+         ::ClearFieldState()
          EXIT
       CASE "BY"
          If Len(aParams) >= 1
@@ -452,11 +515,33 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          Endif
          EXIT
          
-      // --- MAPEAMENTO DE CÓDIGOS DE BARRAS 1D E 2D ---
-      CASE "B1" // Sem equivalente direto
+      // EXTRATOR SEGURO DE IMAGENS (Graphic Field)
+      CASE "GF"
+         nP1 := hb_At(",", cParams)
+         If nP1 > 0
+            nP2 := hb_At(",", cParams, nP1 + 1)
+            If nP2 > 0
+               nP3 := hb_At(",", cParams, nP2 + 1)
+               If nP3 > 0
+                  nP4 := hb_At(",", cParams, nP3 + 1)
+                  If nP4 > 0
+                     cFmt := Upper(Left(cParams, nP1 - 1))
+                     nRowBytes := Val(SubStr(cParams, nP3 + 1, nP4 - nP3 - 1))
+                     cGData := SubStr(cParams, nP4 + 1)
+                     
+                     If cFmt == "A" .AND. nRowBytes > 0
+                        ::DrawGraphicZPL( cGData, nRowBytes )
+                     Endif
+                  Endif
+               Endif
+            Endif
+         Endif
+         EXIT
+
+      CASE "B1"
       CASE "B2"
       CASE "B4"
-      CASE "BO" // Aztec ausente no lib atual
+      CASE "BO"
       CASE "BP"
          ::cBarcodeType := ""
          EXIT
@@ -483,6 +568,136 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    ENDSWITCH
 Return Nil
 
+METHOD DecompressZPLGraphic( cData, nBytesPerRow ) CLASS TZebraToPdf
+   LOCAL cOut := ""
+   LOCAL cPrevLine := Replicate("0", nBytesPerRow * 2)
+   LOCAL cLine := ""
+   LOCAL i, c
+   LOCAL nRepeat := 0
+   
+   If nBytesPerRow <= 0
+      Return ""
+   Endif
+   
+   For i := 1 to Len(cData)
+      c := SubStr(cData, i, 1)
+      
+      // ZPL RLE: g-z representa blocos de repetição gigantes de 20 a 400
+      If c >= 'g' .AND. c <= 'z'
+         nRepeat += (Asc(c) - Asc('g') + 1) * 20
+         Loop
+      Endif
+      
+      // ZPL RLE: G-Y representa repetição de 1 a 19
+      If c >= 'G' .AND. c <= 'Y'
+         nRepeat += (Asc(c) - Asc('G') + 1)
+         Loop
+      Endif
+      
+      If nRepeat == 0
+         nRepeat := 1
+      Endif
+      
+      If c == ','
+         cLine += Replicate("0", Max(0, (nBytesPerRow * 2) - Len(cLine)))
+      ElseIf c == '!'
+         cLine += Replicate("F", Max(0, (nBytesPerRow * 2) - Len(cLine)))
+      ElseIf c == ':'
+         cLine := cPrevLine
+      ElseIf c $ "0123456789ABCDEFabcdef"
+         cLine += Replicate(c, nRepeat)
+      Endif
+      
+      nRepeat := 0 // zera p/ próxima iteração
+      
+      // Validações de empacotamento de quebra de linha
+      If Len(cLine) >= nBytesPerRow * 2
+         cOut += Left(cLine, nBytesPerRow * 2)
+         cPrevLine := Left(cLine, nBytesPerRow * 2)
+         cLine := SubStr(cLine, nBytesPerRow * 2 + 1)
+      Endif
+   Next
+Return cOut
+
+METHOD HexToBinStr( cHex ) CLASS TZebraToPdf
+   LOCAL cBin := ""
+   LOCAL i, c
+   For i := 1 To Len(cHex)
+      c := Upper(SubStr(cHex, i, 1))
+      SWITCH c
+         CASE "0"; cBin += "0000"; EXIT
+         CASE "1"; cBin += "0001"; EXIT
+         CASE "2"; cBin += "0010"; EXIT
+         CASE "3"; cBin += "0011"; EXIT
+         CASE "4"; cBin += "0100"; EXIT
+         CASE "5"; cBin += "0101"; EXIT
+         CASE "6"; cBin += "0110"; EXIT
+         CASE "7"; cBin += "0111"; EXIT
+         CASE "8"; cBin += "1000"; EXIT
+         CASE "9"; cBin += "1001"; EXIT
+         CASE "A"; cBin += "1010"; EXIT
+         CASE "B"; cBin += "1011"; EXIT
+         CASE "C"; cBin += "1100"; EXIT
+         CASE "D"; cBin += "1101"; EXIT
+         CASE "E"; cBin += "1110"; EXIT
+         CASE "F"; cBin += "1111"; EXIT
+      ENDSWITCH
+   Next
+Return cBin
+
+METHOD DrawGraphicZPL( cData, nBytesPerRow ) CLASS TZebraToPdf
+   LOCAL cFullHex, nTotalRows, cRowHex, cRowBin
+   LOCAL nRow, nCol, nStartX, nSpan
+   LOCAL x, y, h, w
+   
+   cFullHex := ::DecompressZPLGraphic( cData, nBytesPerRow )
+   nTotalRows := Len(cFullHex) / (nBytesPerRow * 2)
+   
+   ::ApplyReverseState()
+   HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
+   
+   // Escaneia a imagem "linha por linha"
+   For nRow := 1 to nTotalRows
+      cRowHex := SubStr( cFullHex, ((nRow - 1) * nBytesPerRow * 2) + 1, nBytesPerRow * 2 )
+      cRowBin := ::HexToBinStr( cRowHex )
+      
+      nStartX := -1
+      nSpan := 0
+      
+      // Agrupa bits contínuos e constrói retângulos para economizar memória e tamanho no PDF
+      For nCol := 1 to Len(cRowBin)
+         If SubStr(cRowBin, nCol, 1) == "1"
+            If nStartX == -1
+               nStartX := nCol - 1
+            Endif
+            nSpan++
+         Else
+            If nStartX != -1
+               x := ::MM_X( ::nX + nStartX )
+               y := ::MM_Y( ::nY + (nRow - 1) )
+               w := nSpan * ::nScale
+               h := 1 * ::nScale
+               HPDF_Page_Rectangle( ::hPage, x, y - h, w, h )
+               HPDF_Page_Fill( ::hPage )
+               
+               nStartX := -1
+               nSpan := 0
+            Endif
+         Endif
+      Next
+      
+      // Desenha restante do bloco no final da linha (se houver)
+      If nStartX != -1
+         x := ::MM_X( ::nX + nStartX )
+         y := ::MM_Y( ::nY + (nRow - 1) )
+         w := nSpan * ::nScale
+         h := 1 * ::nScale
+         HPDF_Page_Rectangle( ::hPage, x, y - h, w, h )
+         HPDF_Page_Fill( ::hPage )
+      Endif
+   Next
+Return Nil
+
 METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
    Local nWidth, nMaxLines, nLineSpacing, cAlignment
    Local cLine, aLines, i, nLineShift
@@ -501,9 +716,12 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
    nPdfFontSize := Max( ::nFontSize * ::nScale, 1 )
    HPDF_Page_SetFontAndSize( ::hPage, hActiveFont, nPdfFontSize )
 
+   // Fator de escala seguro: limita a proporção para evitar estouro de largura
    nHScale := 1.0
    If ::nFontHeight > 0 .AND. ::nFontWidth > 0 
-      nHScale := ::nFontWidth / (::nFontHeight * If(::cCurrentFont == "0", 1.0, 0.6))
+      nHScale := ::nFontWidth / (::nFontHeight * If(::cCurrentFont == "0", 1.0, 0.55))
+      // Trava de segurança para impedir expansão indesejada da fonte
+      nHScale := Max(0.4, Min(nHScale, 2.5))
    Endif
 
    ::ApplyReverseState()
@@ -524,8 +742,8 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
       cLine := ""
       For i := 1 To NumToken( cText, " " )
          cWord := Token( cText, " ", i )
-         // Aplicar fator nHScale no momento da quebra para evitar overflow
-         If HPDF_Page_TextWidth( ::hPage, cLine + cWord ) * nHScale > nWidth .AND. !Empty(cLine)
+         // Validação estrita considerando a largura real escalada
+         If ( HPDF_Page_TextWidth( ::hPage, cLine + cWord ) * nHScale ) > nWidth .AND. !Empty(cLine)
             AAdd( aLines, cLine )
             cLine := cWord + " "
          Else
@@ -552,13 +770,13 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
       nDrawX := 0
       
       SWITCH Upper(cAlignment)
-         CASE "C"; nDrawX := (nWidth - nLineWidth) / 2; EXIT
-         CASE "R"; nDrawX := (nWidth - nLineWidth); EXIT
+         CASE "C"; nDrawX := Max(0, (nWidth - nLineWidth) / 2); EXIT
+         CASE "R"; nDrawX := Max(0, (nWidth - nLineWidth)); EXIT
       ENDSWITCH
       
       nLineShift := (i - 1) * (nPdfFontSize + nLineSpacing)
       
-      // Matriz de Rotação aplicada linha a linha (suporta perfeitamente ^FB e ^A)
+      // Aplicação da matriz de rotação preservando os limites da caixa
       SWITCH ::cOrientation
          CASE "R"
             HPDF_Page_SetTextMatrix( ::hPage, 0, -1, nHScale, 0, x - nLineShift, y - nDrawX ); EXIT
@@ -594,7 +812,6 @@ METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
       HPDF_Page_Stroke( ::hPage )
    Endif
 Return Nil
-
 
 METHOD MM_X( nDotX ) CLASS TZebraToPdf
 Return (nDotX * ::nScale)
@@ -640,7 +857,7 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
    DO CASE
       CASE cType == "B3"; hZebra := hb_zebra_create_code39( cData, nFlags )
       CASE cType == "B8"; hZebra := hb_zebra_create_ean8( cData, nFlags )
-      CASE cType == "B9"; hZebra := hb_zebra_create_upce( cData, nFlags ) // CORRIGIDO AQUI
+      CASE cType == "B9"; hZebra := hb_zebra_create_upce( cData, nFlags )
       CASE cType == "BA"; hZebra := hb_zebra_create_code93( cData, nFlags )
       CASE cType == "BC"; hZebra := hb_zebra_create_code128( cData, nFlags )
       CASE cType == "BE"; hZebra := hb_zebra_create_ean13( cData, nFlags )
@@ -653,7 +870,6 @@ METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
          hZebra := hb_zebra_create_qrcode( cData, nFlags )
          lShowText := .F.
       CASE cType == "BX"; hZebra := hb_zebra_create_datamatrix( cData, nFlags ); lShowText := .F.
-      // B1, B2, B4, BO, BP não suportados são rejeitados
       OTHERWISE; hZebra := Nil
    ENDCASE
 
