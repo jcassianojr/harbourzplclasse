@@ -3,7 +3,15 @@
 #include "harupdf.ch"
 
 // ============================================================================
-// CLASSE COMPLETA: TZebraToPdf (Parser de Fontes CF Robusto + FREADLINE)
+// CONSTANTES DE CONVERSÃO MATEMÁTICA (Inspirado no ApplicationConstants.cs)
+// ============================================================================
+#define ZPL_POINTS_TO_MM_FACTOR 25.4
+#define ZPL_DEFAULT_DPI         203
+#define ZPL_DEFAULT_WIDTH_DOTS  812  // Aprox 4 polegadas (100mm)
+#define ZPL_DEFAULT_HEIGHT_DOTS 1218 // Aprox 6 polegadas (150mm)
+
+// ============================================================================
+// CLASSE COMPLETA: TZebraToPdf (Arquitetura Otimizada)
 // ============================================================================
 CLASS TZebraToPdf
    DATA hPdf
@@ -14,27 +22,35 @@ CLASS TZebraToPdf
    DATA nBarWidth INIT 2
    DATA nBarHeight INIT 100
    
-   DATA nDpi INIT 203
+   DATA nDpi INIT ZPL_DEFAULT_DPI
    DATA nScale 
    
    DATA cBarcodeType INIT ""
    DATA nFontSize INIT 15
    DATA lReverse INIT .F.
-   DATA lInverted INIT .F. 
    DATA cOrientation INIT "N" 
    DATA cHexPrefix INIT "" 
    DATA lPrintBarcodeText INIT .T.
    DATA hExtReverse INIT Nil
    DATA hExtNormal INIT Nil
    
-   
    DATA hFontStates INIT {=>} 
    DATA cCurrentFont INIT "A"
    DATA nFontHeight INIT 15
    DATA nFontWidth INIT 15
+   
+   DATA lHexDecodeNextField INIT .F. // Controle para o comando ^FH
 
    METHOD New( nDpi ) CONSTRUCTOR
    METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) 
+   
+   // Novos Métodos de Pré-Processamento e Extração
+   METHOD PreProcessZPL( cZPL )
+   METHOD SplitLabels( cZPL )
+   METHOD ExtractDimensions( cLabel, @nWidth, @nHeight )
+   METHOD DecodeFH( cText )
+   
+   // Métodos de Renderização
    METHOD ParseCommand( cCmd )
    METHOD DrawTextZPL( cText )
    METHOD DrawBoxZPL( nW, nH, nThickness )
@@ -73,23 +89,31 @@ METHOD ApplyReverseState() CLASS TZebraToPdf
    Endif
 Return Nil
 
+// ============================================================================
+// NOVO FLUXO PRINCIPAL DE GERAÇÃO
+// ============================================================================
 METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
-   Local aLines, cLine, aCmds, i, j, cItem
-   Local lIgnoreBin := .F.
+   Local cZplText := ""
+   Local aLabels, cLabel, aCmds, cItem
+   Local i, j, nPageWidth, nPageHeight
    Local aItemData, cKey, uVal, cValStr
-   Local nFileUso, cDelim, cZplText := ""
 
+   // 1. LER ARQUIVO OU STRING PARA A MEMÓRIA
+   If Hb_FileExists( cZplTextOrFile )
+      cZplText := MemoRead( cZplTextOrFile )
+   Else
+      cZplText := cZplTextOrFile
+   Endif
+
+   // 2. SUBSTITUIR VARIÁVEIS
    If ValType( aCAMVALOR ) == "A"
       For i := 1 To Len( aCAMVALOR )
          aItemData := aCAMVALOR[ i ]
-         
          If ValType( aItemData ) == "A" .AND. Len( aItemData ) >= 2
             cKey := aItemData[ 1 ]
             uVal := aItemData[ 2 ]
-            
             If ValType( cKey ) == "C"
                cKey := If( Left( cKey, 1 ) == "@", cKey, "@" + cKey )
-               
                SWITCH ValType( uVal )
                   CASE "C"; cValStr := uVal; EXIT
                   CASE "N"; cValStr := AllTrim( Str( uVal ) ); EXIT
@@ -97,13 +121,18 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
                   CASE "L"; cValStr := If( uVal, "S", "N" ); EXIT
                   OTHERWISE; cValStr := hb_ValToStr( uVal ) 
                ENDSWITCH
-               
-               cZplTextOrFile := StrTran( cZplTextOrFile, cKey, cValStr )
-               cZplTextOrFile := StrTran( cZplTextOrFile, Upper( cKey ), cValStr )
+               cZplText := StrTran( cZplText, cKey, cValStr )
+               cZplText := StrTran( cZplText, Upper( cKey ), cValStr )
             Endif
          Endif
       Next i
    Endif
+
+   // 3. PRÉ-PROCESSAMENTO (Limpa lixo e resolve ^FN)
+   cZplText := ::PreProcessZPL( cZplText )
+
+   // 4. SEPARA MÚLTIPLAS ETIQUETAS (^XA ... ^XZ)
+   aLabels := ::SplitLabels( cZplText )
 
    ::hPdf := HPDF_New()
    If Empty(::hPdf)
@@ -113,94 +142,151 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
    HPDF_SetCompressionMode( ::hPdf, 15 )
    HPDF_SetCurrentEncoder( ::hPdf, "WinAnsiEncoding" )
 
-   // Se for um arquivo existente, lê linha a linha usando a FREADLINE
-   If Hb_FileExists( cZplTextOrFile )
-      cDelim := FDELIM( cZplTextOrFile, 1024 )
-      nFileUso := FOpen( cZplTextOrFile )
-      If nFileUso != -1
-         While .T.
-            cLine := FREADLINE( nFileUso, 1024, .T., cDelim )
-            If cLine == "__FINAL__"
-               EXIT
-            Endif
-
-            cLine := AllTrim( cLine )
-            cLine := StrTran( cLine, "~", "^" )
-
-            If Left(cLine, 3) == "~DG" .OR. Left(cLine, 4) == "^GFA"
-               lIgnoreBin := .T.
-               LOOP
-            Endif
-            
-            If lIgnoreBin
-               If Left(cLine, 1) == "^" .OR. Left(cLine, 1) == "~"
-                  lIgnoreBin := .F.
-               Else
-                  LOOP
-               Endif
-            Endif
-
-            If !Empty( cLine )
-               aCmds := hb_ATokens( cLine, "^" )
-               For j := 1 To Len(aCmds)
-                  cItem := AllTrim(aCmds[j])
-                  If !Empty(cItem)
-                     ::ParseCommand( cItem )
-                  Endif
-               Next j
-            Endif
-         Enddo
-         FClose( nFileUso )
-      Endif
-   Else
-      // Caso receba o ZPL diretamente como string
-      cZplText := StrTran( cZplTextOrFile, "~", "^" )
-      aLines := hb_ATokens( cZplText, Chr(10) )
+   // 5. RENDERIZA CADA ETIQUETA EM UMA NOVA PÁGINA PDF
+   For i := 1 To Len( aLabels )
+      cLabel := aLabels[ i ]
       
-      For i := 1 To Len(aLines)
-         cLine := AllTrim(aLines[i])
-         cLine := StrTran( cLine, Chr(13), "" )
-         
-         If Left(cLine, 3) == "~DG" .OR. Left(cLine, 4) == "^GFA"
-            lIgnoreBin := .T.
-            LOOP
-         Endif
-         
-         If lIgnoreBin
-            If Left(cLine, 1) == "^" .OR. Left(cLine, 1) == "~"
-               lIgnoreBin := .F.
-            Else
-               LOOP
+      // Extrai dimensões ANTES de criar a página
+      ::ExtractDimensions( cLabel, @nPageWidth, @nPageHeight )
+      
+      ::hPage := HPDF_AddPage( ::hPdf )
+      HPDF_Page_SetWidth( ::hPage, nPageWidth * ::nScale ) 
+      HPDF_Page_SetHeight( ::hPage, nPageHeight * ::nScale ) 
+      ::nHeight := HPDF_Page_GetHeight( ::hPage )
+      
+      // Fundo Branco
+      HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
+      HPDF_Page_Rectangle( ::hPage, 0, 0, HPDF_Page_GetWidth( ::hPage ), ::nHeight )
+      HPDF_Page_Fill( ::hPage )
+      HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
+
+      // Reinicia estados para a nova página
+      ::lReverse := .F.
+      ::lHexDecodeNextField := .F.
+      ::cCurrentFont := "A"
+
+      // Parseia os comandos da etiqueta
+      aCmds := hb_ATokens( cLabel, "^" )
+      For j := 1 To Len(aCmds)
+         cItem := AllTrim(aCmds[j])
+         If !Empty(cItem)
+            // Ignora os inicializadores pois a página já foi criada
+            If Left(cItem, 2) != "XA" .AND. Left(cItem, 2) != "XZ"
+               ::ParseCommand( cItem )
             Endif
          Endif
-
-         If !Empty( cLine )
-            aCmds := hb_ATokens( cLine, "^" )
-            For j := 1 To Len(aCmds)
-               cItem := AllTrim(aCmds[j])
-               If !Empty(cItem)
-                  ::ParseCommand( cItem )
-               Endif
-            Next j
-         Endif
-      Next i
-   Endif
+      Next j
+   Next i
 
    HPDF_SaveToFile( ::hPdf, cPdfFile )
    HPDF_Free( ::hPdf )
 Return Hb_FileExists(cPdfFile)
 
+// ============================================================================
+// NOVOS MÉTODOS DE ARQUITETURA
+// ============================================================================
+METHOD PreProcessZPL( cZPL ) CLASS TZebraToPdf
+   Local nPosFN, nPosEnd
+   
+   cZPL := StrTran( cZPL, "~", "^" )
+   cZPL := StrTran( cZPL, "^B0", "^BO" ) // Workaround comum para erro de digitação
+   cZPL := StrTran( cZPL, Chr(13), "" )
+   cZPL := StrTran( cZPL, Chr(10), "" )
+
+   // Remove a tag ^FN (Templates) para evitar que sejam impressos como texto puro
+   nPosFN := At( "^FN", cZPL )
+   While nPosFN > 0
+      nPosEnd := nPosFN + 3
+      While nPosEnd <= Len(cZPL) .AND. ( SubStr(cZPL, nPosEnd, 1) >= "0" .AND. SubStr(cZPL, nPosEnd, 1) <= "9" )
+         nPosEnd++
+      End
+      cZPL := Left( cZPL, nPosFN - 1 ) + SubStr( cZPL, nPosEnd )
+      nPosFN := At( "^FN", cZPL )
+   End
+Return cZPL
+
+METHOD SplitLabels( cZPL ) CLASS TZebraToPdf
+   Local aLabels := {}
+   Local nStart := 1
+   Local nEnd := 0
+   Local cLabel
+
+   //hb_At( <cSearch>, <cString>, [<nStart>], [<nEnd>] ) --> nPos
+   While ( nStart := hb_At( "^XA", cZPL, nStart ) ) > 0
+      nEnd := hb_At( "^XZ", cZPL, nStart )
+      If nEnd > 0
+         cLabel := SubStr( cZPL, nStart, nEnd - nStart + 3 )
+         AAdd( aLabels, cLabel )
+         nStart := nEnd + 3
+      Else
+         // Se não fechar, pega até o final do arquivo
+         cLabel := SubStr( cZPL, nStart )
+         AAdd( aLabels, cLabel )
+         EXIT
+      Endif
+   End
+   
+   // Fallback se o ZPL for mal formatado e não tiver ^XA
+   If Len(aLabels) == 0
+      AAdd( aLabels, cZPL )
+   Endif
+Return aLabels
+
+METHOD ExtractDimensions( cLabel, nWidth, nHeight ) CLASS TZebraToPdf
+   Local nPosPW, nPosLL, cTemp, i
+
+   // Valores Padrão fallback
+   nWidth  := ZPL_DEFAULT_WIDTH_DOTS
+   nHeight := ZPL_DEFAULT_HEIGHT_DOTS
+
+   nPosPW := At( "^PW", cLabel )
+   If nPosPW > 0
+      cTemp := SubStr( cLabel, nPosPW + 3 )
+      nWidth := Val( cTemp )
+   Endif
+
+   nPosLL := At( "^LL", cLabel )
+   If nPosLL > 0
+      cTemp := SubStr( cLabel, nPosLL + 3 )
+      nHeight := Val( cTemp )
+   Endif
+Return Nil
+
+METHOD DecodeFH( cText ) CLASS TZebraToPdf
+   Local cResult := ""
+   Local i := 1
+   Local cHex
+
+   // Substitui sequências Hexadecimais ZPL (ex: _C3_A3 -> ã)
+   While i <= Len( cText )
+      If SubStr( cText, i, 1 ) == "_" .AND. i + 2 <= Len( cText )
+         cHex := SubStr( cText, i + 1, 2 )
+         If IsHex( cHex )
+            cResult += Chr( hb_HexToNum( cHex ) )
+            i += 3
+            LOOP
+         Endif
+      Endif
+      cResult += SubStr( cText, i, 1 )
+      i++
+   End
+Return cResult
+
+// ============================================================================
+// PARSER E DESENHO
+// ============================================================================
 METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    Local cParams, aParams, cRest, k, cOpcode
-   Local cFontID
-   Local cOrient
+   Local cFontID, cOrient
 
    cCmd := AllTrim(cCmd)
    If Empty(cCmd)
       Return Nil
    Endif
 
-   // Tratamento para ^CF (Define a fonte padrão e salva seu estado persistente)
+   // ---------------------------------------------------------
+   // ^CF (Define a fonte padrão global)
+   // ---------------------------------------------------------
    If Upper(Left(cCmd, 2)) == "CF"
       cFontID := "A" 
       cRest := SubStr(cCmd, 3)
@@ -217,28 +303,25 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       aParams := hb_ATokens( AllTrim(cRest), "," )
       
       If !hb_HHasKey( ::hFontStates, cFontID )
-         ::hFontStates[ cFontID ] := { 15, 15 } // { Altura, Largura }
+         ::hFontStates[ cFontID ] := { 15, 15 } 
       Endif
       
-      // 1. Atualiza Altura e auto-ajusta a Largura caso ela tenha sido omitida no ZPL
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::hFontStates[ cFontID ][1] := Val(aParams[1])
          
          If Len(aParams) < 2 .OR. Empty(aParams[2]) .OR. Val(aParams[2]) <= 0
             IF cFontID == "0"
-               ::hFontStates[ cFontID ][2] := Val(aParams[1]) // Fonte 0 -> proporção 1:1
+               ::hFontStates[ cFontID ][2] := Val(aParams[1]) 
             ELSE
-               ::hFontStates[ cFontID ][2] := Val(aParams[1]) * 0.6 // Fontes A-Z -> proporção 0.6:1
+               ::hFontStates[ cFontID ][2] := Val(aParams[1]) * 0.6 
             ENDIF
          Endif
       Endif
       
-      // 2. Se a largura for passada explicitamente, sobrescreve o auto-ajuste
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::hFontStates[ cFontID ][2] := Val(aParams[2])
       Endif
       
-      // Define a fonte atual e passa os dados da memória para as variáveis ativas
       ::cCurrentFont := cFontID
       ::nFontHeight  := ::hFontStates[ cFontID ][1]
       ::nFontWidth   := ::hFontStates[ cFontID ][2]
@@ -247,7 +330,9 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       Return Nil
    Endif
 
-   // Tratamento para ^A (Invoca temporariamente uma fonte para o campo atual)
+   // ---------------------------------------------------------
+   // ^A (Define fonte temporária do campo)
+   // ---------------------------------------------------------
    If Upper(Left(cCmd, 1)) == "A" .AND. Len(cCmd) >= 2 .AND. (SubStr(cCmd, 2, 1) $ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@")
       cFontID := SubStr(cCmd, 2, 1)
       cRest := SubStr(cCmd, 3)
@@ -271,11 +356,9 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       ::cCurrentFont := cFontID
       ::cOrientation := cOrient
       
-      // 1. Carrega as dimensões herdadas salvas para esta fonte específica
       ::nFontHeight := ::hFontStates[ cFontID ][1]
       ::nFontWidth  := ::hFontStates[ cFontID ][2]
       
-      // 2. Atualiza Altura temporária e auto-ajusta Largura temporária se omitida
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::nFontHeight := Val(aParams[1])
          
@@ -288,7 +371,6 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          Endif
       Endif
       
-      // 3. Se informou a largura, sobrescreve
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::nFontWidth := Val(aParams[2])
       Endif
@@ -316,20 +398,12 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          Endif
          EXIT
          
-      CASE "XA"
-         ::hPage := HPDF_AddPage( ::hPdf )
-         HPDF_Page_SetWidth( ::hPage, 812 * ::nScale ) 
-         HPDF_Page_SetHeight( ::hPage, 1218 * ::nScale ) 
-         ::nHeight := HPDF_Page_GetHeight( ::hPage )
-         
-         HPDF_Page_SetRGBFill( ::hPage, 1, 1, 1 )
-         HPDF_Page_Rectangle( ::hPage, 0, 0, HPDF_Page_GetWidth( ::hPage ), ::nHeight )
-         HPDF_Page_Fill( ::hPage )
-         HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
-         EXIT
-         
       CASE "FR"
          ::lReverse := .T.
+         EXIT
+
+      CASE "FH"
+         ::lHexDecodeNextField := .T.
          EXIT
          
       CASE "FO"
@@ -348,6 +422,13 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          
          cParams := StripBBCode( cParams )
          
+         // Se a flag ^FH estiver ligada, processa UTF-8 (Hex _)
+         If ::lHexDecodeNextField
+            cParams := ::DecodeFH( cParams )
+            ::lHexDecodeNextField := .F. // Consome a flag
+         Endif
+
+         // Processa Hex customizado legado
          If !Empty( ::cHexPrefix )
             cParams := ::DecodeZPLHex( cParams )
          Endif
@@ -391,19 +472,6 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          ::cBarcodeType := "BX"
          EXIT
          
-      CASE "PW" 
-         If Len(aParams) >= 1
-            HPDF_Page_SetWidth( ::hPage, Val(aParams[1]) * ::nScale )
-         Endif
-         EXIT
-         
-      CASE "LL" 
-         If Len(aParams) >= 1
-            HPDF_Page_SetHeight( ::hPage, Val(aParams[1]) * ::nScale )
-            ::nHeight := HPDF_Page_GetHeight( ::hPage ) 
-         Endif
-         EXIT
-         
    ENDSWITCH
 Return Nil
 
@@ -411,12 +479,10 @@ METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
    Local cFontName := "Helvetica-Bold"
    Local hFont, x, y, nPdfFontSize, nHScale
 
-   // Fonte 0 = Negrito (Escalável)
-   // Fontes A-Z = Regular (Matricial)
    IF ::cCurrentFont == "0"
       cFontName := "Helvetica-Bold" 
    ELSE
-      cFontName := "Helvetica" // Revertido para remover o negrito indesejado
+      cFontName := "Helvetica" 
    ENDIF
 
    hFont := HPDF_GetFont( ::hPdf, cFontName, "WinAnsiEncoding" )
@@ -559,6 +625,7 @@ Return (nDotX * ::nScale)
 METHOD MM_Y( nDotY ) CLASS TZebraToPdf
 Return ::nHeight - (nDotY * ::nScale)
 
+// Legacy Custom Hex
 METHOD DecodeZPLHex( cText ) CLASS TZebraToPdf
    Local nPos, cHex, cChar
    
@@ -613,7 +680,6 @@ METHOD ConvertCP850ToWinAnsi( cHex ) CLASS TZebraToPdf
       CASE 167; nWinAnsi := 186; EXIT // º 
       CASE 166; nWinAnsi := 170; EXIT // ª 
    ENDSWITCH
-   
 Return Chr( nWinAnsi )
 
 STATIC FUNCTION IsHex( cStr )
@@ -666,104 +732,4 @@ FUNCTION StripBBCode( cLinha )
       ENDIF
       nPosIni := hb_At( "[", cLinha, nPosIni + 1 )
    ENDDO
-
 RETURN cLinha
-
-
-// ============================================================================
-// FUNÇÕES SUPORTE (FREADLINE, FDELIM, SplitCommaAspas)
-// ============================================================================
-
-STATIC FUNCTION FREADLINE( handle, line_len, lremchrexp, cDELI )
-
-   LOCAL buffer, line_end, num_bytes, cRETU
-
-   IF ValType( line_len ) <> 'N'
-      line_len := 1024
-   ENDIF
-   IF ValType( lremchrexp ) <> "L"
-      lREMCHREXP := .T.
-   ENDIF
-   IF ValType( cDELI ) <> "C"
-      cDELI := Chr( 13 ) + Chr( 10 )
-   ENDIF
-   cRETU := ""
-   buffer := Space( line_len )
-   num_bytes := FRead( handle, @buffer, line_len )
-   line_end := At( cDELI, buffer )
-   
-   IF line_end = 0
-      FSeek( handle, 0 )
-      RETURN ( '__FINAL__' )
-   ELSE
-      IF cDELI = Chr( 10 )
-         FSeek( handle, ( num_bytes * -1 ) + line_end, 1 )  
-      ELSE
-         FSeek( handle, ( num_bytes * -1 ) + line_end + 1, 1 )  
-      ENDIF
-      
-      IF lREMCHREXP
-         cRETU := SubStr( buffer, 1, line_end - 1 )
-         cRETU := RANGEREPL( Chr( 0 ), Chr( 9 ), cRETU, " " )   
-         cRETU := RANGEREPL( Chr( 11 ), Chr( 12 ), cRETU, " " )   
-         cRETU := RANGEREPL( Chr( 14 ), Chr( 31 ), cRETU, " " )   
-         cRETU := RANGEREPL( Chr( 127 ), Chr( 255 ), cRETU, " " )
-         RETURN cRETU
-      ELSE
-         RETURN ( SubStr( buffer, 1, line_end - 1 ) )
-      ENDIF
-   ENDIF
-RETURN cRETU
-
-STATIC FUNCTION FDELIM( cARQ, line_len, cPADRAO )
-
-   LOCAL buffer, line_end, num_bytes, nhandle, cRETU
-
-   IF ValType( line_len ) <> 'N'
-      line_len := 1024
-   ENDIF
-   cRETU := ""
-   buffer := Space( line_len )
-   nHANDLE := FOpen( cARQ )
-   num_bytes := FRead( nhandle, @buffer, line_len )
-   IF Empty( AllTrim( BUFFER ) )
-      buffer := FReadStr( nhandle, line_len )
-   ENDIF
-   FClose( NHANDLE )
-
-   line_end := At( Chr( 13 ) + Chr( 10 ), buffer )  
-   IF line_end > 0
-      cRETU := Chr( 13 ) + Chr( 10 )
-      RETURN cRETU
-   ENDIF
-
-   line_end := At( Chr( 10 ), buffer )  
-   IF line_end > 0
-      cRETU := Chr( 10 )
-      RETURN cRETU
-   ENDIF
-
-   line_end := At( Chr( 13 ), buffer )  
-   IF line_end > 0
-      cRETU := Chr( 13 )
-      RETURN cRETU
-   ENDIF
-
-   line_end := At( Chr( 255 ) + Chr( 254 ), buffer )
-   IF line_end > 0
-      cRETU := Chr( 255 ) + Chr( 254 )
-      RETURN cRETU
-   ENDIF
-
-   line_end := At( Chr( 239 ) + Chr( 187 ) + Chr( 191 ), buffer )
-   IF line_end > 0
-      cRETU := Chr( 239 ) + Chr( 187 ) + Chr( 191 )
-      RETURN cRETU
-   ENDIF
-
-   IF Empty( cRETU ) .AND. ValType( cPADRAO ) = "C"
-      cRETU := cPADRAO
-   ENDIF
-
-   RETURN cRETU
-
