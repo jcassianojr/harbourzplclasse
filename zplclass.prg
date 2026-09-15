@@ -21,6 +21,7 @@ CLASS TZebraToPdf
    DATA nY INIT 0
    DATA nBarWidth INIT 2
    DATA nBarHeight INIT 100
+   DATA hFont // <- ADICIONE ESTA LINHA AQUI
    
    DATA nDpi INIT ZPL_DEFAULT_DPI
    DATA nScale 
@@ -40,6 +41,11 @@ CLASS TZebraToPdf
    DATA nFontWidth INIT 15
    
    DATA lHexDecodeNextField INIT .F. // Controle para o comando ^FH
+   
+   
+   DATA nLHx INIT 0       // Label Home X
+   DATA nLHy INIT 0       // Label Home Y
+   DATA aFieldBlock       // Configurações temporárias do ^FB (Field Block)
 
    METHOD New( nDpi ) CONSTRUCTOR
    METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) 
@@ -52,7 +58,7 @@ CLASS TZebraToPdf
    
    // Métodos de Renderização
    METHOD ParseCommand( cCmd )
-   METHOD DrawTextZPL( cText )
+   METHOD DrawTextZPL( cText, aFieldBlock )
    METHOD DrawBoxZPL( nW, nH, nThickness )
    METHOD DrawBarcodeZPL( cData, cType )
    METHOD MM_X( nDotX )
@@ -60,6 +66,8 @@ CLASS TZebraToPdf
    METHOD DecodeZPLHex( cText )
    METHOD ConvertCP850ToWinAnsi( cHex )
    METHOD ApplyReverseState()
+   METHOD DrawCircleZPL( nDiameter, nThickness )
+   METHOD DrawEllipseZPL( nWidth, nHeight, nThickness )
 ENDCLASS
 
 METHOD New( nDpi ) CLASS TZebraToPdf
@@ -141,6 +149,9 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
 
    HPDF_SetCompressionMode( ::hPdf, 15 )
    HPDF_SetCurrentEncoder( ::hPdf, "WinAnsiEncoding" )
+   
+   // -> ADICIONE ESTA LINHA: Carrega a fonte no documento
+   ::hFont := HPDF_GetFont( ::hPdf, "Helvetica", "WinAnsiEncoding" )
 
    // 5. RENDERIZA CADA ETIQUETA EM UMA NOVA PÁGINA PDF
    For i := 1 To Len( aLabels )
@@ -272,9 +283,6 @@ METHOD DecodeFH( cText ) CLASS TZebraToPdf
    End
 Return cResult
 
-// ============================================================================
-// PARSER E DESENHO
-// ============================================================================
 METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    Local cParams, aParams, cRest, k, cOpcode
    Local cFontID, cOrient
@@ -327,6 +335,24 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       ::nFontWidth   := ::hFontStates[ cFontID ][2]
       ::nFontSize    := ::nFontHeight 
       
+      Return Nil
+   Endif
+
+   // ---------------------------------------------------------
+   // ^A@ (Usa o nome da fonte para chamar a fonte)
+   // ---------------------------------------------------------
+   If Upper(Left(cCmd, 2)) == "A@"
+      // O parser completo aqui exigiria mapear fontes do sistema
+      // Mas definimos a orientação e tamanho básicos para fallback[cite: 39]
+      cRest := SubStr(cCmd, 3)
+      aParams := hb_ATokens( AllTrim(cRest), "," )
+      If Len(aParams) >= 1
+         ::cOrientation := Left(aParams[1], 1)
+      Endif
+      If Len(aParams) >= 2 .AND. Val(aParams[2]) > 0
+         ::nFontHeight := Val(aParams[2])
+         ::nFontSize := ::nFontHeight
+      Endif
       Return Nil
    Endif
 
@@ -384,7 +410,7 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    aParams := hb_ATokens( cParams, "," )
 
    SWITCH cOpcode
-      CASE "FX"
+      CASE "FX" // Comentários
          EXIT
          
       CASE "JM"
@@ -395,6 +421,25 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
                CASE "C"; ::nDpi := 152; EXIT
             ENDSWITCH
             ::nScale := 72 / ::nDpi 
+         Endif
+         EXIT
+         
+      CASE "LH" // Label Home (Altera a origem global)
+         If Len(aParams) >= 2
+            ::nLHx := Val(aParams[1])
+            ::nLHy := Val(aParams[2])
+         Endif
+         EXIT
+
+      CASE "FW" // Field Orientation global[cite: 38]
+         If Len(aParams) >= 1
+            ::cOrientation := aParams[1]
+         Endif
+         EXIT
+
+      CASE "FB" // Field Block (Bloco de texto com quebra)[cite: 38]
+         If Len(aParams) >= 2
+            ::aFieldBlock := { Val(aParams[1]), Val(aParams[2]), If(Len(aParams)>=3, Val(aParams[3]), 0), If(Len(aParams)>=4, aParams[4], "L") }
          Endif
          EXIT
          
@@ -410,8 +455,9 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
       CASE "FT" 
          ::cOrientation := "N" 
          If Len(aParams) >= 2
-            ::nX := Val(aParams[1])
-            ::nY := Val(aParams[2])
+            // Aplica o offset do Label Home (^LH)[cite: 38]
+            ::nX := Val(aParams[1]) + ::nLHx
+            ::nY := Val(aParams[2]) + ::nLHy
          Endif
          EXIT
          
@@ -422,13 +468,11 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          
          cParams := StripBBCode( cParams )
          
-         // Se a flag ^FH estiver ligada, processa UTF-8 (Hex _)
          If ::lHexDecodeNextField
             cParams := ::DecodeFH( cParams )
-            ::lHexDecodeNextField := .F. // Consome a flag
+            ::lHexDecodeNextField := .F. 
          Endif
 
-         // Processa Hex customizado legado
          If !Empty( ::cHexPrefix )
             cParams := ::DecodeZPLHex( cParams )
          Endif
@@ -437,12 +481,14 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
             ::DrawBarcodeZPL( cParams, ::cBarcodeType )
             ::cBarcodeType := ""
          Else
-            ::DrawTextZPL( cParams )
+            // Passar o aFieldBlock caso ^FB tenha sido declarado antes do ^FD[cite: 38]
+            ::DrawTextZPL( cParams, ::aFieldBlock )
          Endif
          ::lReverse := .F. 
+         ::aFieldBlock := Nil // Limpa o estado do bloco após o uso
          EXIT    
          
-      CASE "GB"
+      CASE "GB" // Graphic Box[cite: 38]
          If Len(aParams) >= 3
             ::DrawBoxZPL( Val(aParams[1]), Val(aParams[2]), Val(aParams[3]) )
          ElseIf Len(aParams) == 2
@@ -450,8 +496,20 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          Endif
          ::lReverse := .F. 
          EXIT
+
+      CASE "GC" // Graphic Circle[cite: 38]
+         If Len(aParams) >= 2
+             ::DrawCircleZPL( Val(aParams[1]), Val(aParams[2]) )
+         Endif
+         EXIT
+
+      CASE "GE" // Graphic Ellipse[cite: 38]
+         If Len(aParams) >= 3
+            ::DrawEllipseZPL( Val(aParams[1]), Val(aParams[2]), Val(aParams[3]) )
+         Endif
+         EXIT
          
-      CASE "BY"
+      CASE "BY" // Configurações de Códigos de Barras[cite: 38]
          If Len(aParams) >= 1
             ::nBarWidth := Val(aParams[1])
          Endif
@@ -460,63 +518,108 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          Endif
          EXIT
          
-      CASE "B3"
-         ::cBarcodeType := "B3"
-         EXIT
-         
-      CASE "BC"
-         ::cBarcodeType := "BC"
-         EXIT
-
-      CASE "BX" 
-         ::cBarcodeType := "BX"
-         EXIT
+      // --- MAPEAMENTO DE CÓDIGOS DE BARRAS (1D e 2D)[cite: 38, 39] ---
+      CASE "B1"; ::cBarcodeType := "B1"; EXIT // Code 11[cite: 38]
+      CASE "B2"; ::cBarcodeType := "B2"; EXIT // Interleaved 2 of 5[cite: 38]
+      CASE "B3"; ::cBarcodeType := "B3"; EXIT // Code 39[cite: 38]
+      CASE "B4"; ::cBarcodeType := "B4"; EXIT // Code 49[cite: 38]
+      CASE "B8"; ::cBarcodeType := "B8"; EXIT // EAN-8[cite: 38]
+      CASE "B9"; ::cBarcodeType := "B9"; EXIT // UPC-E[cite: 38]
+      CASE "BA"; ::cBarcodeType := "BA"; EXIT // Code 93[cite: 38]
+      CASE "BC"; ::cBarcodeType := "BC"; EXIT // Code 128[cite: 38]
+      CASE "BE"; ::cBarcodeType := "BE"; EXIT // EAN-13[cite: 38]
+      CASE "BU"; ::cBarcodeType := "BU"; EXIT // UPC-A[cite: 38]
+      
+      // 2D Barcodes
+      CASE "B7"; ::cBarcodeType := "B7"; EXIT // PDF417[cite: 38]
+      CASE "B0"
+      CASE "BO"; ::cBarcodeType := "BO"; EXIT // Aztec[cite: 38]
+      CASE "BP"; ::cBarcodeType := "BP"; EXIT // Plessey[cite: 38]
+      CASE "BQ"; ::cBarcodeType := "BQ"; EXIT // QR Code[cite: 38]
+      CASE "BX"; ::cBarcodeType := "BX"; EXIT // Data Matrix[cite: 38]
          
    ENDSWITCH
 Return Nil
 
-METHOD DrawTextZPL( cText ) CLASS TZebraToPdf
-   Local cFontName := "Helvetica-Bold"
-   Local hFont, x, y, nPdfFontSize, nHScale
 
-   IF ::cCurrentFont == "0"
-      cFontName := "Helvetica-Bold" 
-   ELSE
-      cFontName := "Helvetica" 
-   ENDIF
+METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
+   Local nWidth, nMaxLines, nLineSpacing, cAlignment
+   Local cLine, aLines, i, nYOffset
+   Local cWord, cDrawLine, nLineWidth, nDrawX
+   Local nPdfX, nPdfY, nPdfFontSize
 
-   hFont := HPDF_GetFont( ::hPdf, cFontName, "WinAnsiEncoding" )
+   // 1. Calcula o tamanho real da fonte em escala PDF
+   nPdfFontSize := Max( ::nFontSize * ::nScale, 1 )
    
-   x := ::MM_X( ::nX )
-   nPdfFontSize := ::nFontSize * ::nScale 
-   
-   y := ::MM_Y( ::nY ) - (nPdfFontSize * 0.8)
+   // 2. OBRIGATÓRIO: Aplica a fonte na página ANTES de medir ou desenhar
+   HPDF_Page_SetFontAndSize( ::hPage, ::hFont, nPdfFontSize )
 
-   nHScale := 1.0
-   IF ::nFontHeight > 0 .AND. ::nFontWidth > 0 
-      nHScale := ::nFontWidth / (::nFontHeight * If(::cCurrentFont == "0", 1.0, 0.6))
-   ENDIF
+   // ---------------------------------------------------------
+   // TEXTO SIMPLES (Sem Bloco)
+   // ---------------------------------------------------------
+   If Empty( aFieldBlock )
+      nPdfX := ::MM_X( ::nX )
+      // O PDF desenha a partir da base da letra (bottom-left), então subtraímos o tamanho da fonte
+      nPdfY := ::MM_Y( ::nY ) - nPdfFontSize 
 
-   ::ApplyReverseState()
+      HPDF_Page_BeginText( ::hPage )
+      HPDF_Page_TextOut( ::hPage, nPdfX, nPdfY, cText )
+      HPDF_Page_EndText( ::hPage )
+      Return Nil
+   Endif
 
-   HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
+   // ---------------------------------------------------------
+   // TEXTO EM BLOCO (^FB)
+   // ---------------------------------------------------------
+   // Converte as dimensões do bloco ZPL para a escala PDF
+   nWidth       := aFieldBlock[1] * ::nScale
+   nMaxLines    := aFieldBlock[2]
+   nLineSpacing := aFieldBlock[3] * ::nScale
+   cAlignment   := aFieldBlock[4] // L = Left, C = Center, R = Right, J = Justified
+
+   // Lógica simples de Word Wrap
+   aLines := {}
+   cLine := ""
+   For i := 1 To NumToken( cText, " " )
+      cWord := Token( cText, " ", i )
+      
+      If HPDF_Page_TextWidth( ::hPage, cLine + cWord ) > nWidth
+         AAdd( aLines, cLine )
+         cLine := cWord + " "
+      Else
+         cLine += cWord + " "
+      Endif
+   Next
+   If !Empty(cLine)
+      AAdd( aLines, cLine )
+   Endif
+
+   If Len(aLines) > nMaxLines .AND. nMaxLines > 0
+      ASize( aLines, nMaxLines )
+   Endif
+
+   // Base Y convertida para PDF
+   nYOffset := ::MM_Y( ::nY ) - nPdfFontSize
    HPDF_Page_BeginText( ::hPage )
    
-   SWITCH ::cOrientation
-      CASE "R" 
-         HPDF_Page_SetTextMatrix( ::hPage, 0, -1, nHScale, 0, x, y )
-         EXIT
-      CASE "I" 
-         HPDF_Page_SetTextMatrix( ::hPage, -nHScale, 0, 0, -1, x, y )
-         EXIT
-      CASE "B" 
-         HPDF_Page_SetTextMatrix( ::hPage, 0, 1, -nHScale, 0, x, y )
-         EXIT
-      OTHERWISE 
-         HPDF_Page_SetTextMatrix( ::hPage, nHScale, 0, 0, 1, x, y )
-   ENDSWITCH
+   For i := 1 To Len( aLines )
+      cDrawLine := AllTrim(aLines[i])
+      nLineWidth := HPDF_Page_TextWidth( ::hPage, cDrawLine )
+      nPdfX := ::MM_X( ::nX ) 
+      
+      SWITCH Upper(cAlignment)
+         CASE "C"
+            nPdfX := nPdfX + (nWidth - nLineWidth) / 2
+            EXIT
+         CASE "R"
+            nPdfX := nPdfX + (nWidth - nLineWidth)
+            EXIT
+      ENDSWITCH
+
+      HPDF_Page_TextOut( ::hPage, nPdfX, nYOffset, cDrawLine )
+      nYOffset -= (nPdfFontSize + nLineSpacing)
+   Next
    
-   HPDF_Page_ShowText( ::hPage, cText )
    HPDF_Page_EndText( ::hPage )
 Return Nil
 
@@ -539,84 +642,80 @@ METHOD DrawBoxZPL( nW, nH, nThickness ) CLASS TZebraToPdf
    Endif
 Return Nil
 
-METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
-   LOCAL hZebra, nFlags := 0
-   LOCAL x := ::MM_X( ::nX )
-   LOCAL y := ::MM_Y( ::nY ) 
-   LOCAL hFont, nPdfFontSize
-   LOCAL nRawHeight, nPdfBarHeight
-   LOCAL nWidthFactor, nTextWidth, nCenterTextX
-   LOCAL nHarbourModules := 0, nActualWidth
-   LOCAL lShowText := .T.
 
-   nRawHeight := If( ValType(::nBarHeight) == "N" .AND. ::nBarHeight > 0, ::nBarHeight, 100 )
-   nPdfBarHeight := Abs( ::MM_Y( nRawHeight ) - ::MM_Y( 0 ) )
+METHOD DrawBarcodeZPL( cData, cType ) CLASS TZebraToPdf
+   Local hZebra
+   Local nFlags := 0 // Flags de configuração do hbzebra (ex: exibir texto, checksum)
+   Local bDrawBlock
+
+   // Se o usuário solicitou texto abaixo do código (geralmente controlado por outros comandos)
+   // nFlags := HB_ZEBRA_FLAG_PRINT // Exemplo
 
    SWITCH cType
-      CASE "BC"; hZebra := hb_zebra_create_code128( cData, nFlags )   ; EXIT
-      CASE "B3"; hZebra := hb_zebra_create_code39( cData, nFlags )    ; EXIT
-      CASE "BX"; hZebra := hb_zebra_create_datamatrix( cData, nFlags ); lShowText := .F.; EXIT
-      CASE "B7"; hZebra := hb_zebra_create_pdf417( cData, nFlags )    ; lShowText := .F.; EXIT
-      CASE "BQ"; hZebra := hb_zebra_create_qrcode( cData, nFlags )    ; lShowText := .F.; EXIT
-      OTHERWISE; hZebra := hb_zebra_create_code128( cData, nFlags )
+      // Códigos 1D
+      CASE "B3" // Code 39
+         hZebra := hb_zebra_create_code39( cData, nFlags )
+         EXIT
+      CASE "BC" // Code 128
+         hZebra := hb_zebra_create_code128( cData, nFlags )
+         EXIT
+      CASE "BE" // EAN-13
+         hZebra := hb_zebra_create_ean13( cData, nFlags )
+         EXIT
+      CASE "B8" // EAN-8
+         hZebra := hb_zebra_create_ean8( cData, nFlags )
+         EXIT
+      CASE "BU" // UPC-A
+         hZebra := hb_zebra_create_upca( cData, nFlags )
+         EXIT
+      CASE "B9" // UPC-E
+         hZebra := hb_zebra_create_upce( cData, nFlags )
+         EXIT
+         
+      // Códigos 2D
+      CASE "BQ" // QR Code
+         // O ZPL envia o QR code geralmente com prefixos de qualidade, ex: "QA,texto"
+         // Será necessário limpar cData se ele contiver "QA," ou "M2," etc.
+         If Substr(cData, 2, 1) == ","
+            cData := SubStr(cData, 3)
+         Endif
+         hZebra := hb_zebra_create_qrcode( cData, nFlags )
+         EXIT
+      CASE "B7" // PDF417
+         hZebra := hb_zebra_create_pdf417( cData, nFlags )
+         EXIT
+      CASE "BX" // Data Matrix
+         hZebra := hb_zebra_create_datamatrix( cData, nFlags )
+         EXIT
+      OTHERWISE
+         // Fallback padrão se não reconhecer
+         hZebra := hb_zebra_create_code128( cData, nFlags )
    ENDSWITCH
 
-   If hZebra != Nil .AND. hb_zebra_geterror( hZebra ) == 0
+   If hZebra != Nil
       
-      ::ApplyReverseState()
-      
-      hb_zebra_draw( hZebra, {| cx, cy, cw, ch | nHarbourModules := Max(cx + cw, nHarbourModules) }, 0, 0, 1, 1 )
-      If nHarbourModules <= 0
-         nHarbourModules := 100
-      Endif
-      
-      If ::nBarWidth <= 0
-         ::nBarWidth := 2
-      Endif
-      nWidthFactor := ::nBarWidth * ::nScale 
-      
-      If !lShowText
-         nPdfBarHeight := nWidthFactor
-      Endif
+      // Garante que o preenchimento será preto para o código de barras
+      HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 )
 
-      HPDF_Page_GSave( ::hPage )
+      // Cria a "ponte": O hbzebra envia (x, y, w, h) para cada barra, 
+      // e nós traduzimos isso para retângulos no HaruPDF considerando a escala.
+      bDrawBlock := {| x, y, w, h | ;
+         HPDF_Page_Rectangle( ::hPage, ;
+                              ::MM_X( ::nX + x ), ;
+                              ::MM_Y( ::nY + y ) - (h * ::nScale), ;
+                              w * ::nScale, ;
+                              h * ::nScale ), ;
+         HPDF_Page_Fill( ::hPage ), ;
+         Nil ;
+      }
 
-      SWITCH ::cOrientation
-         CASE "R"
-            HPDF_Page_Concat( ::hPage, 0, -1, 1, 0, x, y )
-            EXIT
-         CASE "I"
-            HPDF_Page_Concat( ::hPage, -1, 0, 0, -1, x, y )
-            EXIT
-         CASE "B"
-            HPDF_Page_Concat( ::hPage, 0, 1, -1, 0, x, y )
-            EXIT
-         OTHERWISE
-            HPDF_Page_Concat( ::hPage, 1, 0, 0, 1, x, y )
-      ENDSWITCH
-
-      hb_zebra_draw( hZebra, {| bx, by, bw, bh | HPDF_Page_Rectangle( ::hPage, bx, by, bw, bh ) }, 0, -nPdfBarHeight, nWidthFactor, nPdfBarHeight )
-      HPDF_Page_Fill( ::hPage )
-
-      If lShowText .AND. ::lPrintBarcodeText
-         nActualWidth := nHarbourModules * nWidthFactor
-         hFont := HPDF_GetFont( ::hPdf, "Helvetica-Bold", "WinAnsiEncoding" )
-         
-         nPdfFontSize := 20 * ::nScale 
-         HPDF_Page_SetFontAndSize( ::hPage, hFont, nPdfFontSize )
-         
-         nTextWidth := HPDF_Page_TextWidth( ::hPage, cData )
-         nCenterTextX := (nActualWidth / 2) - (nTextWidth / 2)
-         
-         HPDF_Page_BeginText( ::hPage )
-         HPDF_Page_SetTextMatrix( ::hPage, 1, 0, 0, 1, nCenterTextX, -nPdfBarHeight - (nPdfFontSize * 1.0) )
-         HPDF_Page_ShowText( ::hPage, cData ) 
-         HPDF_Page_EndText( ::hPage )
-      Endif
+      // Chama a função genérica de desenho do hbzebra passando o bloco, 
+      // começando em offset 0,0 (pois o bloco já soma ::nX e ::nY)
+      hb_zebra_draw( hZebra, bDrawBlock, 0, 0, ::nBarWidth, ::nBarHeight )
       
-      HPDF_Page_GRestore( ::hPage )
       hb_zebra_destroy( hZebra )
    Endif
+   
 Return Nil
 
 METHOD MM_X( nDotX ) CLASS TZebraToPdf
@@ -733,3 +832,48 @@ FUNCTION StripBBCode( cLinha )
       nPosIni := hb_At( "[", cLinha, nPosIni + 1 )
    ENDDO
 RETURN cLinha
+
+METHOD DrawCircleZPL( nDiameter, nThickness ) CLASS TZebraToPdf
+   Local nRadius, x, y
+
+   If Empty( nDiameter )
+      Return Nil
+   Endif
+   
+   nThickness := If( Empty(nThickness), 1, nThickness )
+   
+   // Aplica a escala para as dimensões
+   nRadius := (nDiameter / 2) * ::nScale
+   nThickness := nThickness * ::nScale
+   
+   // Converte as coordenadas
+   x := ::MM_X( ::nX )
+   y := ::MM_Y( ::nY )
+   
+   HPDF_Page_SetLineWidth( ::hPage, Max(nThickness, 0.5) )
+   HPDF_Page_Circle( ::hPage, x + nRadius, y - nRadius, nRadius )
+   HPDF_Page_Stroke( ::hPage )
+Return Nil
+
+METHOD DrawEllipseZPL( nWidth, nHeight, nThickness ) CLASS TZebraToPdf
+   Local nRadiusX, nRadiusY, x, y
+
+   If Empty( nWidth ) .OR. Empty( nHeight )
+      Return Nil
+   Endif
+   
+   nThickness := If( Empty(nThickness), 1, nThickness )
+   
+   // Aplica a escala
+   nRadiusX := (nWidth / 2) * ::nScale
+   nRadiusY := (nHeight / 2) * ::nScale
+   nThickness := nThickness * ::nScale
+   
+   // Converte as coordenadas
+   x := ::MM_X( ::nX )
+   y := ::MM_Y( ::nY )
+   
+   HPDF_Page_SetLineWidth( ::hPage, Max(nThickness, 0.5) )
+   HPDF_Page_Ellipse( ::hPage, x + nRadiusX, y - nRadiusY, nRadiusX, nRadiusY )
+   HPDF_Page_Stroke( ::hPage )
+Return Nil
