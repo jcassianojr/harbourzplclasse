@@ -1,0 +1,7 @@
+incpaths=include
+
+libpaths=lib/${hb_plat}/${hb_comp}
+
+libs=zplclass
+
+{!xhb}prgflags=-gc3

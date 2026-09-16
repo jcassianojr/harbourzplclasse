@@ -1,4 +1,86 @@
 ```markdown
+
+
+## Arquitetura
+
+O repositório é um projeto pequeno e concentrado: o núcleo inteiro está em `zplclass.prg`, acompanhado por um programa de exemplo em `teste\teste.prg`, uma entrada ZPL (`teste\teste.zpl`), um PDF gerado e um script de compilação específico para Windows.
+
+O fluxo principal é:
+
+```text
+ZPL em string ou arquivo
+        |
+        v
+TZebraToPdf:Generate()
+        |
+        +-- Substituição de variáveis
+        +-- Pré-processamento do ZPL
+        +-- Separação de múltiplas etiquetas
+        +-- Extração de dimensões
+        +-- Interpretação dos comandos
+        +-- Renderização em PDF
+        v
+Arquivo PDF via HaruPDF
+```
+
+### Módulo principal: `zplclass.prg`
+
+A classe `TZebraToPdf` combina parser, estado da etiqueta e renderização:
+
+- **Entrada e preparação**
+  - `Generate()` aceita ZPL direto ou caminho de arquivo.
+  - Substitui variáveis como `@CLIENTE`.
+  - Processa múltiplas seções `^XA...^XZ`.
+  - Extrai `^PW` e `^LL`.
+- **Estado de impressão**
+  - Posição atual (`^FO`, `^FT`).
+  - Fonte e orientação (`^A`, `^CF`, `^FW`).
+  - Configuração de código de barras (`^BY`, `^BC`, `^B3`, `^BQ`, `^BX`, etc.).
+  - Reversão de campo (`^FR`) e decodificação hexadecimal (`^FH`).
+- **Parser**
+  - `ParseCommand()` identifica os comandos ZPL e atualiza o estado.
+  - O parser atualmente é baseado em busca textual de `^` e tratamento especial para `^FD...^FS`, não sendo um analisador formal/tokenizado.
+- **Renderização**
+  - Texto: `DrawTextZPL()`.
+  - Códigos de barras: `DrawBarcodeZPL()`.
+  - Caixas, círculos e elipses: `DrawBoxZPL()`, `DrawCircleZPL()` e `DrawEllipseZPL()`.
+  - Gráficos `^GF`: descompressão e rasterização em `DrawGraphicZPL()`.
+  - Conversão de coordenadas: `MM_X()` e `MM_Y()` transformam dots ZPL em pontos PDF.
+
+### Programa de teste
+
+`teste\teste.prg` contém dois exemplos:
+
+- `Main()`: cria ou lê `teste.zpl` e gera `teste.pdf`.
+- `Main02()`: gera uma etiqueta complexa diretamente em Harbour.
+
+`teste\compteste.bat` compila com `hbmk2`, vinculando `hbhpdf`, `hbzebra`, `xhb` e um arquivo externo de modo de erro. O script possui caminhos absolutos para uma instalação local do Harbour.
+
+## Stack tecnológico
+
+- **Linguagem:** Harbour/xBase, compatível conceitualmente com Clipper.
+- **Geração de PDF:** HaruPDF através de `hbhpdf`/`libhpdf`.
+- **Códigos de barras:** `hbzebra`.
+- **Build:** `hbmk2`.
+- **Plataforma atualmente documentada:** Windows/MinGW, com dependências instaladas externamente.
+- **Formato processado:** subconjunto de ZPL II.
+- **Saída:** PDF com uma página por etiqueta.
+- **Testes:** exemplos manuais e artefato PDF; não há suíte automatizada, manifesto de dependências, CI ou configuração de build portátil.
+
+## Principais pontos
+
+faixa útil do ZPL:
+
+- Textos com fontes, escala, alinhamento e orientação.
+- Code 39, Code 93, Code 128, EAN, UPC, PDF417, QR Code e DataMatrix via `hbzebra`.
+- Formas geométricas básicas.
+- Etiquetas múltiplas no mesmo fluxo.
+- Substituição de valores em tempo de execução.
+- Dados hexadecimais e gráficos comprimidos em formato ZPL.
+- Conversão de resolução (`^JM`) e dimensões da etiqueta.
+
+
+
 # TZebraToPdf
 
 Um conversor nativo de código ZPL (Zebra Programming Language) para PDF desenvolvido em **Harbour**. Esta classe permite renderizar etiquetas térmicas, códigos de barras e formas geométricas diretamente em arquivos PDF, eliminando a necessidade de impressoras físicas para testes ou emissão de documentos digitais.

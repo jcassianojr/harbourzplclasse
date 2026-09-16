@@ -1,0 +1,28 @@
+
+-o${hb_name}
+
+
+-hbx=${hb_name}.hbx
+
+
+# Nome da biblioteca de saída
+-olib/${hb_plat}/${hb_comp}/${hb_name}
+
+{!xhb}-hbx=zplclass.hbx
+{!xhb}zplclass.hbx
+
+xhb.hbc
+hbhpdf.hbc
+hbzebra.hbc
+
+# Modo biblioteca
+-hblib
+-inc
+
+# Configurações de compilação (equivalentes aos parâmetros do .bat)
+-n -w2 -gc0
+
+
+zplclass.prg
+
+$hb_pkg_install.hbm
