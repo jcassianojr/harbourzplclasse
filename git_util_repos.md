@@ -1,91 +1,91 @@
-harbour core
+harbour core   
 https://github.com/harbour/core.git
 
-harbour vszakats
+harbour vszakats   
 https://github.com/vszakats/hb.git
 
-sefazclass JoseQuintas
+sefazclass JoseQuintas   
 https://github.com/JoseQuintas/sefazclass
 
-sefazclass malcarli1
+sefazclass malcarli1   
 https://github.com/malcarli1/sefazclass
 
-harbour sqlrddpp
+harbour sqlrddpp   
 https://github.com/marcosgambeta/sqlrddpp.git
 
-harbour hbxlswriter
+harbour hbxlswriter   
 https://github.com/diegofazio/hbxlsxwriter
 
-harbour libxlswriter
+harbour libxlswriter   
 https://github.com/jmcnamara/libxlsxwriter.git
 
-harbour xlsx
+harbour xlsx   
 https://github.com/digikv/xlsx.git
 
-harbour openads
+harbour openads   
 https://github.com/FiveTechSoft/OpenADS
 
-xharbour
+xharbour   
 https://github.com/xHarbour-org/xharbour
 
-ocilib 
+ocilib  
 https://github.com/vrogier/ocilib
 
-harbour builder tdclass
+harbour builder tdclass   
 https://github.com/FiveTechSoft/HarbourBuilder
 
-adoxb
+adoxb   
 https://pctoledo.org/viewtopic.php?t=6772
 
-dbfcdxex
+dbfcdxex   
 https://github.com/carles9000/dbfcdxex
 
-HBnfeEmail
+HBnfeEmail   
 https://github.com/malcarli1/Nova-HbNfeEmail
 
 hmg
-https://www.hmgextended.com/
-https://github.com/ivanilmarcelino/OpenMinigui
+- https://www.hmgextended.com/
+- https://github.com/ivanilmarcelino/OpenMinigui
 
 Paradox
-https://pxlib.sourceforge.net/
-https://github.com/steinm/pxlib 
+- https://pxlib.sourceforge.net/
+- https://github.com/steinm/pxlib 
 
-MySQL
+MySQL   
 https://www.mysql.com 
 
-MariaDB
+MariaDB   
 https://mariadb.org 
 
-PostgreSQL
+PostgreSQL   
 https://www.postgresql.org 
 
-Firebird
-https://firebirdsql.org 
-http://www.flamerobin.org/
+Firebird   
+- https://firebirdsql.org 
+- http://www.flamerobin.org/
 
-CUBRID
+CUBRID   
 https://www.cubrid.org 
 
-DUCKDB
-https://duckdb.org/
-https://ducklake.select/
-https://www.timestored.com/qstudio/
+DUCKDB   
+- https://duckdb.org/
+- https://ducklake.select/
+- https://www.timestored.com/qstudio/
 
-OPENSSL
+OPENSSL   
 https://github.com/openssl/openssl
 
 SQLITE
-https://www.sqlite.org/index.html
-http://www.ch-werner.de/sqliteodbc/
-https://letos.org/
+- https://www.sqlite.org/index.html
+- http://www.ch-werner.de/sqliteodbc/
+- https://letos.org/
 
 LETODB
-https://sourceforge.net/projects/letodb/ 
-https://git.code.sf.net/p/letodb/code 
-https://github.com/elchs/LetoDBf 
-https://github.com/alkresin/letodb 
+- https://sourceforge.net/projects/letodb/ 
+- https://git.code.sf.net/p/letodb/code 
+- https://github.com/elchs/LetoDBf 
+- https://github.com/alkresin/letodb 
 
-ZPL
+ZPL   
 https://github.com/brunoleocam/ZPL2PDF
-
+https://github.com/BinaryKits/BinaryKits.Zpl

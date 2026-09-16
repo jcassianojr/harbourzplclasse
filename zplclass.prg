@@ -3,7 +3,7 @@
 #include "harupdf.ch"
 
 // ============================================================================
-// CONSTANTES DE CONVERSÃO MATEMÁTICA
+// CONSTANTES DE CONVERSÃO MATEMÁTICA E SISTEMA DE UNIDADES
 // ============================================================================
 #define ZPL_POINTS_TO_MM_FACTOR 25.4
 #define ZPL_DEFAULT_DPI         203
@@ -28,9 +28,9 @@ CLASS TZebraToPdf
    DATA nBarHeight INIT 100
    DATA cGlobalOrient INIT "N"
    DATA cCurrentFont INIT "A"
-   DATA nFontHeight INIT 15
-   DATA nFontWidth INIT 15
-   DATA nFontSize INIT 15
+   DATA nFontHeight INIT 9 // Metrica padrão Zebra Fonte A
+   DATA nFontWidth INIT 5  // Metrica padrão Zebra Fonte A
+   DATA nFontSize INIT 9
    
    // --- ESTADO ESPECÍFICO DO CAMPO ---
    DATA cOrientation INIT "N" 
@@ -43,20 +43,22 @@ CLASS TZebraToPdf
    DATA aFieldBlock       
    DATA cHexPrefix INIT "" 
    
-   // --- CONFIGURAÇÕES DO CONVERSOR ---
+   // --- CONFIGURAÇÕES DO CONVERSOR E FONTES ---
    DATA nDpi INIT ZPL_DEFAULT_DPI
    DATA nScale 
    DATA lPrintBarcodeText INIT .T.
    DATA hExtReverse INIT Nil
    DATA hExtNormal INIT Nil
    DATA hFontStates INIT {=>} 
+   DATA hFontMap INIT {=>} 
 
    METHOD New( nDpi ) CONSTRUCTOR
    METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) 
    
-   // Métodos de Gerenciamento de Estado (Virtual Printer)
+   // Métodos de Gerenciamento de Estado e Unidades
    METHOD ResetLabelState()
    METHOD ClearFieldState()
+   METHOD GetDefaultFontMetrics( cFont, @nH, @nW )
    
    METHOD PreProcessZPL( cZPL )
    METHOD SplitLabels( cZPL )
@@ -85,10 +87,30 @@ METHOD New( nDpi ) CLASS TZebraToPdf
       ::nDpi := nDpi
    Endif
    ::nScale := 72 / ::nDpi 
+   
+   ::hFontMap := {=>}
+   ::hFontMap["0"] := "Helvetica-Bold"
+   ::hFontMap["A"] := "Helvetica"
+   ::hFontMap["B"] := "Helvetica"
 Return Self
 
+METHOD GetDefaultFontMetrics( cFont, nH, nW ) CLASS TZebraToPdf
+   // Tabela Oficial de Matriz de Pontos ZPL II (Base 203 DPI)
+   SWITCH Upper( cFont )
+      CASE "A"; nH := 9;  nW := 5;  EXIT
+      CASE "B"; nH := 11; nW := 7;  EXIT
+      CASE "C"; nH := 18; nW := 10; EXIT
+      CASE "D"; nH := 18; nW := 10; EXIT
+      CASE "E"; nH := 28; nW := 15; EXIT
+      CASE "F"; nH := 26; nW := 13; EXIT
+      CASE "G"; nH := 60; nW := 40; EXIT
+      CASE "H"; nH := 21; nW := 13; EXIT
+      CASE "0"; nH := 15; nW := 15; EXIT
+      OTHERWISE; nH := 15; nW := 15
+   ENDSWITCH
+Return Nil
+
 METHOD ResetLabelState() CLASS TZebraToPdf
-   // Restaura a impressora para os padrões de fábrica a cada nova etiqueta (^XA)
    ::nX := 0
    ::nY := 0
    ::nLHx := 0
@@ -96,15 +118,17 @@ METHOD ResetLabelState() CLASS TZebraToPdf
    ::nBarWidth := 2
    ::nBarHeight := 100
    ::cGlobalOrient := "N"
+   
+   // Padrão de Inicialização de Etiqueta (Fonte A)
    ::cCurrentFont := "A"
-   ::nFontHeight := 15
-   ::nFontWidth := 15
-   ::nFontSize := 15
+   ::nFontHeight := 9
+   ::nFontWidth := 5
+   ::nFontSize := 9
+   
    ::ClearFieldState()
 Return Nil
 
 METHOD ClearFieldState() CLASS TZebraToPdf
-   // Limpa as formatações que só duram até o fim de um campo (^FS)
    ::cOrientation := ::cGlobalOrient
    ::cFieldOrient := ""
    ::nFieldHeight := 0
@@ -196,18 +220,13 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
       HPDF_Page_Fill( ::hPage )
       HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
 
-      // Reinicia o estado para cada nova etiqueta processada
       ::ResetLabelState()
 
-      // ======================================================================
-      // PARSER DE FLUXO (LEXER SEGURO)
-      // ======================================================================
       nPos := 1
       While ( nPos := hb_At( "^", cLabel, nPos ) ) > 0
          
          cOpcode := Upper( SubStr( cLabel, nPos + 1, 2 ) )
          
-         // BLOCO DE EXTRAÇÃO SEGURA PARA FIELD DATA (^FD)
          If cOpcode == "FD"
             nNextPos := hb_At( "^FS", Upper(cLabel), nPos + 1 )
             If nNextPos > 0
@@ -223,7 +242,6 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
             Endif
          Endif
          
-         // PROCESSAMENTO PADRÃO
          nNextPos := hb_At( "^", cLabel, nPos + 1 )
          
          If nNextPos == 0
@@ -241,8 +259,6 @@ METHOD Generate( cZplTextOrFile, cPdfFile, aCAMVALOR ) CLASS TZebraToPdf
          Endif
          
       End
-      // ======================================================================
-
    Next i
 
    HPDF_SaveToFile( ::hPdf, cPdfFile )
@@ -346,12 +362,17 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
    Local cParams, aParams, cRest, cOpcode
    Local cFontID, cOrient
    Local nP1, nP2, nP3, nP4, cFmt, nRowBytes, cGData
+   Local cAlias, cFontFile
+   Local nDefH, nDefW
 
    cCmd := AllTrim(cCmd)
    If Empty(cCmd)
       Return Nil
    Endif
 
+   // =========================================================
+   // PROCESSAMENTO ESTrito DE MATRIZ DE FONTE (^CF e ^A)
+   // =========================================================
    If Upper(Left(cCmd, 2)) == "CF"
       cFontID := "A" 
       cRest := SubStr(cCmd, 3)
@@ -363,22 +384,25 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          cRest := SubStr(cRest, 2)
       Endif
       aParams := hb_ATokens( AllTrim(cRest), "," )
+      
+      ::GetDefaultFontMetrics( cFontID, @nDefH, @nDefW )
+      
       If !hb_HHasKey( ::hFontStates, cFontID )
-         ::hFontStates[ cFontID ] := { 15, 15 } 
+         ::hFontStates[ cFontID ] := { nDefH, nDefW } 
       Endif
+      
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::hFontStates[ cFontID ][1] := Val(aParams[1])
+         
+         // Se a largura for omitida, calcula baseado na proporção REAL da fonte
          If Len(aParams) < 2 .OR. Empty(aParams[2]) .OR. Val(aParams[2]) <= 0
-            If cFontID == "0"
-               ::hFontStates[ cFontID ][2] := Val(aParams[1]) 
-            Else
-               ::hFontStates[ cFontID ][2] := Val(aParams[1]) * 0.6 
-            Endif
+            ::hFontStates[ cFontID ][2] := Round( Val(aParams[1]) * (nDefW / nDefH), 0 ) 
          Endif
       Endif
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::hFontStates[ cFontID ][2] := Val(aParams[2])
       Endif
+      
       ::cCurrentFont := cFontID
       ::nFontHeight  := ::hFontStates[ cFontID ][1]
       ::nFontWidth   := ::hFontStates[ cFontID ][2]
@@ -398,26 +422,30 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
          cRest := SubStr(cRest, 2)
       Endif
       aParams := hb_ATokens( AllTrim(cRest), "," )
+      
+      ::GetDefaultFontMetrics( cFontID, @nDefH, @nDefW )
+      
       If !hb_HHasKey( ::hFontStates, cFontID )
-         ::hFontStates[ cFontID ] := { 15, 15 }
+         ::hFontStates[ cFontID ] := { nDefH, nDefW }
       Endif
+      
       ::cCurrentFont := cFontID
       ::cOrientation := cOrient
       ::nFontHeight := ::hFontStates[ cFontID ][1]
       ::nFontWidth  := ::hFontStates[ cFontID ][2]
+      
       If Len(aParams) >= 1 .AND. !Empty(aParams[1]) .AND. Val(aParams[1]) > 0
          ::nFontHeight := Val(aParams[1])
+         
+         // Se a largura for omitida, calcula baseado na proporção REAL da fonte
          If Len(aParams) < 2 .OR. Empty(aParams[2]) .OR. Val(aParams[2]) <= 0
-            If cFontID == "0"
-               ::nFontWidth := Val(aParams[1])
-            Else
-               ::nFontWidth := Val(aParams[1]) * 0.6
-            Endif
+            ::nFontWidth := Round( Val(aParams[1]) * (nDefW / nDefH), 0 )
          Endif
       Endif
       If Len(aParams) >= 2 .AND. !Empty(aParams[2]) .AND. Val(aParams[2]) > 0
          ::nFontWidth := Val(aParams[2])
       Endif
+      
       ::nFontSize := ::nFontHeight
       Return Nil
    Endif
@@ -428,6 +456,20 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
 
    SWITCH cOpcode
       CASE "FX"; EXIT
+      CASE "CW"
+         If Len(aParams) >= 2 .AND. !Empty(aParams[1])
+            cAlias := Upper( Left( aParams[1], 1 ) )
+            cFontFile := Upper( aParams[2] )
+            
+            If "BOLD" $ cFontFile .OR. "B." $ cFontFile
+               ::hFontMap[ cAlias ] := "Helvetica-Bold"
+            ElseIf "COUR" $ cFontFile
+               ::hFontMap[ cAlias ] := "Courier"
+            Else
+               ::hFontMap[ cAlias ] := "Helvetica"
+            Endif
+         Endif
+         EXIT
       CASE "JM"
          If Len(aParams) >= 1
             SWITCH Upper(aParams[1])
@@ -478,7 +520,6 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
             ::DrawTextZPL( cParams, ::aFieldBlock )
          Endif
          
-         // Limpa o field state (Virtual Printer reset command-to-command)
          ::ClearFieldState()
          EXIT    
       CASE "GB"
@@ -514,8 +555,6 @@ METHOD ParseCommand( cCmd ) CLASS TZebraToPdf
             ::aFieldBlock := { Val(aParams[1]), Val(aParams[2]), If(Len(aParams)>=3, Val(aParams[3]), 0), If(Len(aParams)>=4, aParams[4], "L") }
          Endif
          EXIT
-         
-      // EXTRATOR SEGURO DE IMAGENS (Graphic Field)
       CASE "GF"
          nP1 := hb_At(",", cParams)
          If nP1 > 0
@@ -582,13 +621,11 @@ METHOD DecompressZPLGraphic( cData, nBytesPerRow ) CLASS TZebraToPdf
    For i := 1 to Len(cData)
       c := SubStr(cData, i, 1)
       
-      // ZPL RLE: g-z representa blocos de repetição gigantes de 20 a 400
       If c >= 'g' .AND. c <= 'z'
          nRepeat += (Asc(c) - Asc('g') + 1) * 20
          Loop
       Endif
       
-      // ZPL RLE: G-Y representa repetição de 1 a 19
       If c >= 'G' .AND. c <= 'Y'
          nRepeat += (Asc(c) - Asc('G') + 1)
          Loop
@@ -608,9 +645,8 @@ METHOD DecompressZPLGraphic( cData, nBytesPerRow ) CLASS TZebraToPdf
          cLine += Replicate(c, nRepeat)
       Endif
       
-      nRepeat := 0 // zera p/ próxima iteração
+      nRepeat := 0
       
-      // Validações de empacotamento de quebra de linha
       If Len(cLine) >= nBytesPerRow * 2
          cOut += Left(cLine, nBytesPerRow * 2)
          cPrevLine := Left(cLine, nBytesPerRow * 2)
@@ -656,7 +692,6 @@ METHOD DrawGraphicZPL( cData, nBytesPerRow ) CLASS TZebraToPdf
    ::ApplyReverseState()
    HPDF_Page_SetRGBFill( ::hPage, 0, 0, 0 ) 
    
-   // Escaneia a imagem "linha por linha"
    For nRow := 1 to nTotalRows
       cRowHex := SubStr( cFullHex, ((nRow - 1) * nBytesPerRow * 2) + 1, nBytesPerRow * 2 )
       cRowBin := ::HexToBinStr( cRowHex )
@@ -664,7 +699,6 @@ METHOD DrawGraphicZPL( cData, nBytesPerRow ) CLASS TZebraToPdf
       nStartX := -1
       nSpan := 0
       
-      // Agrupa bits contínuos e constrói retângulos para economizar memória e tamanho no PDF
       For nCol := 1 to Len(cRowBin)
          If SubStr(cRowBin, nCol, 1) == "1"
             If nStartX == -1
@@ -686,7 +720,6 @@ METHOD DrawGraphicZPL( cData, nBytesPerRow ) CLASS TZebraToPdf
          Endif
       Next
       
-      // Desenha restante do bloco no final da linha (se houver)
       If nStartX != -1
          x := ::MM_X( ::nX + nStartX )
          y := ::MM_Y( ::nY + (nRow - 1) )
@@ -702,25 +735,25 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
    Local nWidth, nMaxLines, nLineSpacing, cAlignment
    Local cLine, aLines, i, nLineShift
    Local cWord, cDrawLine, nLineWidth, nDrawX
-   Local nPdfFontSize, nHScale, x, y
+   Local nPdfFontSize, nHScale, nBaseRatio, x, y
    Local cFontName
    Local hActiveFont
 
-   If ::cCurrentFont == "0"
-      cFontName := "Helvetica-Bold" 
+   If hb_HHasKey( ::hFontMap, ::cCurrentFont )
+      cFontName := ::hFontMap[ ::cCurrentFont ]
    Else
-      cFontName := "Helvetica" 
+      cFontName := If( ::cCurrentFont == "0", "Helvetica-Bold", "Helvetica" )
    Endif
+
    hActiveFont := HPDF_GetFont( ::hPdf, cFontName, "WinAnsiEncoding" )
 
    nPdfFontSize := Max( ::nFontSize * ::nScale, 1 )
    HPDF_Page_SetFontAndSize( ::hPage, hActiveFont, nPdfFontSize )
 
-   // Fator de escala seguro: limita a proporção para evitar estouro de largura
    nHScale := 1.0
    If ::nFontHeight > 0 .AND. ::nFontWidth > 0 
-      nHScale := ::nFontWidth / (::nFontHeight * If(::cCurrentFont == "0", 1.0, 0.55))
-      // Trava de segurança para impedir expansão indesejada da fonte
+      nBaseRatio := If( "Bold" $ cFontName, 1.0, If( "Courier" $ cFontName, 0.60, 0.55 ) )
+      nHScale := ::nFontWidth / (::nFontHeight * nBaseRatio)
       nHScale := Max(0.4, Min(nHScale, 2.5))
    Endif
 
@@ -742,7 +775,6 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
       cLine := ""
       For i := 1 To NumToken( cText, " " )
          cWord := Token( cText, " ", i )
-         // Validação estrita considerando a largura real escalada
          If ( HPDF_Page_TextWidth( ::hPage, cLine + cWord ) * nHScale ) > nWidth .AND. !Empty(cLine)
             AAdd( aLines, cLine )
             cLine := cWord + " "
@@ -776,7 +808,6 @@ METHOD DrawTextZPL( cText, aFieldBlock ) CLASS TZebraToPdf
       
       nLineShift := (i - 1) * (nPdfFontSize + nLineSpacing)
       
-      // Aplicação da matriz de rotação preservando os limites da caixa
       SWITCH ::cOrientation
          CASE "R"
             HPDF_Page_SetTextMatrix( ::hPage, 0, -1, nHScale, 0, x - nLineShift, y - nDrawX ); EXIT
