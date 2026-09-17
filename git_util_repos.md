@@ -87,5 +87,6 @@ LETODB
 - https://github.com/alkresin/letodb 
 
 ZPL   
-https://github.com/brunoleocam/ZPL2PDF
-https://github.com/BinaryKits/BinaryKits.Zpl
+- https://github.com/brunoleocam/ZPL2PDF
+- https://github.com/BinaryKits/BinaryKits.Zpl
+- https://app.zpldesigner.com/
